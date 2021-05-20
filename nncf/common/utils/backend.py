@@ -10,5 +10,30 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 """
+# Workaround to handle the common part for Torch and TensorFlow backends.
+import importlib
+import os
+import sys
+
+
+def import_module_from_path(module_name, path):
+    module_path = os.path.abspath(path)
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+source_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+backend = import_module_from_path(
+    'nncf.common.utils.backend',
+    os.path.join(source_root, 'nncf', 'common', 'utils', 'backend.py')
+)
+
+backend.__nncf_backend__ = 'TensorFlow'
 
 __nncf_backend__ = 'Torch'
+else:
+     __nncf_backend__ = 'Tensorflow'
+

@@ -19,7 +19,7 @@ from nncf.common.utils.backend import __nncf_backend__
 if __nncf_backend__ == 'Torch':
     from nncf.torch.exporter import PTExporter
 elif __nncf_backend__ == 'TensorFlow':
-    from beta.nncf.tensorflow.exporter import TFExporter
+    from nncf.tensorflow.exporter import TFExporter
 
 
 def create_exporter(model: ModelType,

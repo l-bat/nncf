@@ -35,10 +35,10 @@ if __nncf_backend__ == 'Torch':
     from nncf.torch.graph.graph import get_module_identifier
     from nncf.torch.utils import should_consider_scope
 elif __nncf_backend__ == 'TensorFlow':
-    from beta.nncf.tensorflow.pruning.utils import is_depthwise_conv
-    from beta.nncf.tensorflow.pruning.utils import is_conv_with_downsampling
-    from beta.nncf.tensorflow.graph.utils import get_layer_identifier as get_module_identifier
-    from beta.nncf.tensorflow.utils.scopes_handle import should_consider_scope
+    from nncf.tensorflow.pruning.utils import is_depthwise_conv
+    from nncf.tensorflow.pruning.utils import is_conv_with_downsampling
+    from nncf.tensorflow.graph.utils import get_layer_identifier as get_module_identifier
+    from nncf.tensorflow.utils.scopes_handle import should_consider_scope
 
 
 class PruningNodeSelector:

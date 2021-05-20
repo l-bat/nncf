@@ -35,7 +35,7 @@ This function returns a transformed model ready for compression fine-tuning, and
 ```python
 import beta.nncf
 from beta.nncf import create_compressed_model
-from beta.nncf import NNCFConfig
+from nncf.config import NNCFConfig
 
 # Instantiate your uncompressed model
 from tensorflow.keras.applications import ResNet50

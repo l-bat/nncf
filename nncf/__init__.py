@@ -66,3 +66,10 @@ if __nncf_backend__ == 'Torch':
     from nncf.torch.extensions import force_build_cpu_extensions, force_build_cuda_extensions
 
     patch_torch_operators()
+
+elif __nncf_backend__ == 'Tensorflow':
+    from nncf.tensorflow.model_creation import create_compressed_model
+    from nncf.tensorflow.callback_creation import create_compression_callbacks
+
+    from tensorflow.python.keras.engine import keras_tensor
+    keras_tensor.disable_keras_tensors()
