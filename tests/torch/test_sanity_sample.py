@@ -417,9 +417,14 @@ def test_cpu_only_mode_produces_cpu_only_model(config, tmp_path, mocker):
         import examples.torch.semantic_segmentation.main as sample
         import examples.torch.semantic_segmentation.train
         mocker.spy(examples.torch.semantic_segmentation.train.Train, "__init__")
+        import examples.torch.semantic_segmentation.main as sample
+        mocked_printing = mocker.patch('examples.torch.semantic_segmentation.main.print_statistics')
+        import examples.torch.semantic_segmentation.train
+        mocker.spy(examples.torch.semantic_segmentation.train.Train, "__init__")
     elif config["sample_type"] == "object_detection":
         import examples.torch.object_detection.main as sample
         mocker.spy(sample, "train")
+        mocked_printing = mocker.patch('examples.torch.object_detection.main.print_statistics')
 
 
     sample.main(shlex.split(command_line))

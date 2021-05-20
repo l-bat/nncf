@@ -22,7 +22,7 @@ from pytest import approx
 
 from examples.torch.common.utils import get_name
 from tests.common.helpers import TEST_ROOT
-from tests.torch.helpers import Command
+from tests.common.command import Command
 from tests.common.helpers import get_cli_dict_args
 from tests.torch.test_sanity_sample import create_command_line
 
