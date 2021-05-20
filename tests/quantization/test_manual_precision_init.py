@@ -15,7 +15,7 @@ from typing import List
 import os
 import pytest
 
-from examples.common.model_loader import load_model
+from examples.torch.common.model_loader import load_model
 from nncf import NNCFConfig
 from nncf import register_default_init_args
 from tests.conftest import EXAMPLES_DIR
