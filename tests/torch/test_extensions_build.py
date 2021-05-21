@@ -48,7 +48,7 @@ def test_force_cuda_build(tmp_venv_with_nncf, install_type, tmp_path, package_ty
 
     mode = 'cpu'
 
-    command = Command("{} {}/extensions_build_checks.py {}".format(python_executable_with_venv, run_path, mode),
+    command = Command("{} {}/torch/extensions_build_checks.py {}".format(python_executable_with_venv, run_path, mode),
                       path=run_path)
     command.run()
 
@@ -74,7 +74,7 @@ def test_force_cuda_build(tmp_venv_with_nncf, install_type, tmp_path, package_ty
 
     mode = 'cuda'
 
-    command = Command("{} {}/extensions_build_checks.py {}".format(python_executable_with_venv, run_path, mode),
+    command = Command("{} {}/torch/extensions_build_checks.py {}".format(python_executable_with_venv, run_path, mode),
                       path=run_path)
     command.run()
 
