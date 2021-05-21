@@ -9,9 +9,9 @@ from nncf.config import NNCFConfig
 from tests.conftest import PROJECT_ROOT, TEST_ROOT
 
 GOOD_CONFIG_SOURCES = [
-    PROJECT_ROOT / Path("examples/classification/configs"),
-    PROJECT_ROOT / Path("examples/semantic_segmentation/configs"),
-    PROJECT_ROOT / Path("examples/object_detection/configs"),
+    PROJECT_ROOT / Path("examples/torch/classification/configs"),
+    PROJECT_ROOT / Path("examples/torch/semantic_segmentation/configs"),
+    PROJECT_ROOT / Path("examples/torch/object_detection/configs"),
     TEST_ROOT / Path("data/configs")
 ]
 
