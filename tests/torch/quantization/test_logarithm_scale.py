@@ -18,7 +18,7 @@ import nncf
 from nncf import NNCFConfig
 from tests.torch.helpers import create_compressed_model_and_algo_for_test
 
-from tests.torch.test_helpers import TwoConvTestModel
+from tests.torch.test_torch_helpers import TwoConvTestModel
 
 SAMPLE_SIZE = [1, 1, 4, 4]
 
