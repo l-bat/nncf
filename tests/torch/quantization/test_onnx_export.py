@@ -20,8 +20,8 @@ from nncf.torch.quantization.layers import PTQuantizerSpec
 from nncf.torch.quantization.layers import QUANTIZATION_MODULES
 from nncf.torch.quantization.layers import QuantizationMode
 from nncf.torch.quantization.layers import QuantizerExportMode
-from tests.torch.test_torch_helpers import TwoConvTestModel
-from tests.torch.test_torch_helpers import load_exported_onnx_version
+from tests.torch.test_helpers import TwoConvTestModel
+from tests.torch.test_helpers import load_exported_onnx_version
 
 
 def get_config_for_export_mode(should_be_onnx_standard: bool) -> NNCFConfig:

@@ -1,0 +1,21 @@
+strict digraph  {
+label="Propagating quantizers: 1\nNext quantizer to be propagated: 1\nFinished quantizers: ";
+labelloc=t;
+"0 /nncf_model_input_0";
+"1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0";
+"2 /nncf_model_output_0";
+"POST HOOK 0 /nncf_model_input_0" [color=red, label="IP: TargetType.OPERATOR_POST_HOOK"];
+"PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" [color=red, label="IP: TargetType.OPERATOR_PRE_HOOK 0"];
+"Quantizer #1" [color=blue, label="Quantizer #1\nT: [B:8 M:S SGN:ANY PC:N,\nB:8 M:A SGN:ANY PC:N]\nQ-input sink ops: 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"];
+"POST HOOK 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" [color=red, label="IP: TargetType.OPERATOR_POST_HOOK"];
+"PRE HOOK 0 2 /nncf_model_output_0" [color=red, label="IP: TargetType.OPERATOR_PRE_HOOK 0"];
+"POST HOOK 2 /nncf_model_output_0" [color=red, label="IP: TargetType.OPERATOR_POST_HOOK"];
+"0 /nncf_model_input_0" -> "POST HOOK 0 /nncf_model_input_0";
+"1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "POST HOOK 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0";
+"2 /nncf_model_output_0" -> "POST HOOK 2 /nncf_model_output_0";
+"POST HOOK 0 /nncf_model_input_0" -> "PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0";
+"PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"  [color=blue, label=1];
+"Quantizer #1" -> "PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"  [style=dashed];
+"POST HOOK 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "PRE HOOK 0 2 /nncf_model_output_0";
+"PRE HOOK 0 2 /nncf_model_output_0" -> "2 /nncf_model_output_0";
+}

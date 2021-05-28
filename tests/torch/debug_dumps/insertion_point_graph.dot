@@ -1,0 +1,22 @@
+digraph  {
+"0 /nncf_model_input_0";
+"1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0";
+"2 /nncf_model_output_0";
+"POST HOOK 0 /nncf_model_input_0" [color=red, label="IP: TargetType.OPERATOR_POST_HOOK"];
+"PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" [color=red, label="IP: TargetType.OPERATOR_PRE_HOOK port 0"];
+"POST HOOK 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" [color=red, label="IP: TargetType.OPERATOR_POST_HOOK"];
+"PRE HOOK 0 2 /nncf_model_output_0" [color=red, label="IP: TargetType.OPERATOR_PRE_HOOK port 0"];
+"POST HOOK 2 /nncf_model_output_0" [color=red, label="IP: TargetType.OPERATOR_POST_HOOK"];
+"0 /nncf_model_input_0" -> "POST HOOK 0 /nncf_model_input_0"  [key=0];
+"0 /nncf_model_input_0" -> "POST HOOK 0 /nncf_model_input_0"  [headport=e, key=1, style=dashed, tailport=e];
+"1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "POST HOOK 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"  [key=0];
+"1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "POST HOOK 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"  [headport=e, key=1, style=dashed, tailport=e];
+"1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"  [headport=e, key=0, style=dashed, tailport=e];
+"2 /nncf_model_output_0" -> "POST HOOK 2 /nncf_model_output_0"  [key=0];
+"2 /nncf_model_output_0" -> "POST HOOK 2 /nncf_model_output_0"  [headport=e, key=1, style=dashed, tailport=e];
+"2 /nncf_model_output_0" -> "PRE HOOK 0 2 /nncf_model_output_0"  [headport=e, key=0, style=dashed, tailport=e];
+"POST HOOK 0 /nncf_model_input_0" -> "PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"  [key=0];
+"PRE HOOK 0 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0"  [key=0];
+"POST HOOK 1 BasicConvTestModel/NNCFConv2d[conv]/conv2d_0" -> "PRE HOOK 0 2 /nncf_model_output_0"  [key=0];
+"PRE HOOK 0 2 /nncf_model_output_0" -> "2 /nncf_model_output_0"  [key=0];
+}
