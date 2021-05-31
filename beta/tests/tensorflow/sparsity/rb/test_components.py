@@ -20,9 +20,9 @@ from collections import defaultdict
 from itertools import combinations
 from unittest.mock import patch
 
-from beta.nncf import NNCFConfig
-from beta.nncf import create_compressed_model
-from beta.nncf.helpers.callback_creation import create_compression_callbacks
+from nncf import NNCFConfig
+from nncf import create_compressed_model
+from beta.nncf import create_compression_callbacks
 from beta.nncf.tensorflow.sparsity.rb.loss import SparseLoss
 from beta.nncf.tensorflow.sparsity.rb.operation import RBSparsifyingWeight
 from beta.nncf.tensorflow.sparsity.rb.functions import calc_rb_binary_mask

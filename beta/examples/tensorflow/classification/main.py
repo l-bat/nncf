@@ -18,7 +18,7 @@ from pathlib import Path
 import tensorflow as tf
 import tensorflow_addons as tfa
 
-from beta.nncf import create_compressed_model
+from nncf import create_compressed_model
 from beta.nncf import create_compression_callbacks
 from beta.nncf.tensorflow.helpers.model_manager import TFOriginalModelManager
 

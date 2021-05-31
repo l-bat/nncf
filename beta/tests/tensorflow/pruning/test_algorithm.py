@@ -18,7 +18,7 @@ import tensorflow as tf
 import numpy as np
 import pytest
 
-from beta.nncf import NNCFConfig
+from nncf import NNCFConfig
 from beta.tests.tensorflow.helpers import create_compressed_model_and_algo_for_test
 from beta.nncf.tensorflow.graph.utils import collect_wrapped_layers
 

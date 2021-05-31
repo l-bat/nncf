@@ -15,7 +15,7 @@ import pytest
 import tensorflow as tf
 from pytest import approx
 
-from beta.nncf import NNCFConfig
+from nncf import NNCFConfig
 from beta.nncf.tensorflow.layers.wrapper import NNCFWrapper
 from nncf.common.sparsity.schedulers import PolynomialSparsityScheduler
 from beta.nncf.tensorflow.sparsity.rb.algorithm import RBSparsityController

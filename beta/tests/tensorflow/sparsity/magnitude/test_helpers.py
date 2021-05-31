@@ -13,7 +13,7 @@
 
 import tensorflow as tf
 
-from beta.nncf import NNCFConfig
+from nncf import NNCFConfig
 from beta.tests.tensorflow.helpers import create_conv, check_equal
 
 

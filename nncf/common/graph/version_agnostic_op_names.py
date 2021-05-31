@@ -11,7 +11,7 @@
  limitations under the License.
 """
 
-from nncf.common.utils.backend import __nncf_backend__
+from nncf.common.utils.backend import Backend
 
 def get_version_agnostic_name(version_specific_name: str):
     """
@@ -28,7 +28,7 @@ def get_version_agnostic_name(version_specific_name: str):
     :return: The framework version agnostic operator name
     """
     def get_func_impl():
-        if __nncf_backend__ == 'Torch':
+        if Backend.get_preferable_backend() == 'Torch':
             from nncf.torch.graph.version_agnostic_op_names \
                 import get_version_agnostic_name as torch_fn_impl
             return torch_fn_impl

@@ -16,7 +16,7 @@ from addict import Dict
 import argparse
 import os
 
-from beta.nncf import NNCFConfig
+from nncf import NNCFConfig
 
 try:
     import jstyleson as json

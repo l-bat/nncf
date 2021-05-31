@@ -17,7 +17,7 @@ import tensorflow as tf
 from tensorflow.python.keras import layers
 import pytest
 
-from beta.nncf import NNCFConfig
+from nncf import NNCFConfig
 from beta.nncf.tensorflow.graph.metatypes.matcher import get_keras_layer_metatype
 from beta.nncf.tensorflow.layers.custom_objects import NNCF_QUANTIZATION_OPERATONS
 from beta.nncf.tensorflow.layers.operation import InputType

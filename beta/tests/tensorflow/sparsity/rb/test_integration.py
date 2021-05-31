@@ -17,11 +17,11 @@ from pathlib import Path
 import pytest
 import os
 
-from beta.nncf import NNCFConfig
-from beta.nncf import create_compressed_model
+from nncf import NNCFConfig
+from nncf import create_compressed_model
 from nncf.common.composite_compression import CompositeCompressionAlgorithmController
 from beta.examples.tensorflow.common.callbacks import get_callbacks, get_progress_bar
-from beta.nncf.helpers.callback_creation import create_compression_callbacks
+from beta.nncf import create_compression_callbacks
 
 
 MODEL_PATH = Path(__file__).parent.parent.parent / 'data' / 'mock_models' / 'LeNet.h5'

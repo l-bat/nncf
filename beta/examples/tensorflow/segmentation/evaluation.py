@@ -15,7 +15,7 @@ import sys
 
 import tensorflow as tf
 
-from beta.nncf import create_compressed_model
+from nncf import create_compressed_model
 from beta.nncf.tensorflow.helpers.model_manager import TFOriginalModelManager
 
 from beta.examples.tensorflow.common.argparser import get_common_argument_parser

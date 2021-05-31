@@ -11,6 +11,8 @@
  limitations under the License.
 """
 
+from nncf.common.utils.backend import Backend
+
 from beta.nncf.tensorflow.algorithm_selector import get_compression_algorithm_builder
 from beta.nncf.tensorflow.api.composite_compression import TFCompositeCompressionAlgorithmBuilder
 from beta.nncf.tensorflow.helpers.utils import get_built_model
@@ -30,6 +32,7 @@ def create_compression_algorithm_builder(config):
 
 
 def create_compressed_model(model, config):
+    Backend.init(model)
     model = get_built_model(model, config)
 
     builder = create_compression_algorithm_builder(config)

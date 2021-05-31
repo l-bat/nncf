@@ -18,7 +18,7 @@ from pathlib import Path
 import tensorflow as tf
 import numpy as np
 
-from beta.nncf import create_compressed_model
+from nncf import create_compressed_model
 from beta.nncf.tensorflow.helpers.model_manager import TFOriginalModelManager
 from nncf.common.utils.tensorboard import prepare_for_tensorboard
 

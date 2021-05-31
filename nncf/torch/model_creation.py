@@ -29,6 +29,7 @@ from nncf.torch.utils import is_dist_avail_and_initialized
 from nncf.torch.algo_selector import COMPRESSION_ALGORITHMS
 
 from nncf.common.utils.logger import logger
+from nncf.common.utils.backend import Backend
 
 
 def get_compression_algorithm(config):
@@ -87,6 +88,7 @@ def create_compressed_model(model: Module, config: NNCFConfig,
     # Compress model that will be deployed for the inference on target device. No need to compress parts of the
     # model that are used on training stage only (e.g. AuxLogits of Inception-v3 model) or unused modules with weights.
     # As a consequence, no need to care about spoiling BN statistics, as there're disabled in eval mode.
+    Backend.init(model)
     model.eval()
 
     if dump_graphs:

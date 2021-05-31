@@ -20,6 +20,8 @@ from nncf.torch.graph.graph import PTNNCFGraph
 from nncf.torch.graph.graph import PTNNCFNode
 from nncf.torch.graph.operator_metatypes import PT_OPERATOR_METATYPES
 
+from nncf.common.utils.backend import Backend
+
 
 class GraphBuilder:
     def __init__(self, custom_forward_fn: Callable[[torch.nn.Module], Any]):
@@ -27,6 +29,7 @@ class GraphBuilder:
 
     def build_graph(self, model: torch.nn.Module, context_to_use: Optional['TracingContext'] = None,
                     as_eval: bool = False) -> PTNNCFGraph:
+        Backend.init(model)
         tracer = GraphTracer(self.custom_forward_fn)
         traced_graph = tracer.trace_graph(model, context_to_use, as_eval)
 

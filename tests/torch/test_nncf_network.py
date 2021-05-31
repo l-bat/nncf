@@ -58,10 +58,7 @@ from tests.torch.helpers import BasicConvTestModel
 from tests.torch.helpers import TwoConvTestModel
 from tests.torch.helpers import check_correct_nncf_modules_replacement
 from tests.torch.helpers import create_compressed_model_and_algo_for_test
-<<<<<<< HEAD:tests/torch/test_nncf_network.py
 from tests.torch.helpers import register_bn_adaptation_init_args
-=======
->>>>>>> c52e9d5... Moved tests to tests/torch dir:tests/torch/test_nncf_network.py
 from tests.torch.test_models.synthetic import ManyNonEvalModules
 
 

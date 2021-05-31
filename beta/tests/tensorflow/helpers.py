@@ -15,8 +15,8 @@ import tensorflow as tf
 from tensorflow.python.ops.init_ops import Constant
 import numpy as np
 
-from beta.nncf import create_compressed_model
-from beta.nncf import NNCFConfig
+from nncf import create_compressed_model
+from nncf import NNCFConfig
 
 from beta.examples.tensorflow.common.object_detection.datasets.builder import COCODatasetBuilder
 
