@@ -15,7 +15,7 @@ import sys
 
 import tensorflow as tf
 
-from nncf.tensorflow.model_creation import create_compressed_model
+from nncf.tensorflow.helpers.model_creation import create_compressed_model
 from examples.tensorflow.common.logger import logger
 from examples.tensorflow.common.sample_config import create_sample_config
 from examples.tensorflow.common.argparser import get_common_argument_parser

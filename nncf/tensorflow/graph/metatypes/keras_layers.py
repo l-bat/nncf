@@ -19,7 +19,7 @@ import tensorflow as tf
 from nncf.common.graph.operator_metatypes import OperatorMetatype
 from nncf.common.graph.operator_metatypes import OperatorMetatypeRegistry
 from nncf.common.hardware.opset import HWConfigOpName
-from beta.nncf.tensorflow.graph.metatypes.tf_ops import TF_OPERATION_METATYPES
+from nncf.tensorflow.graph.metatypes.tf_ops import TF_OPERATION_METATYPES
 
 WeightDef = namedtuple('WeightDef', ['weight_attr_name', 'channel_axes'])
 

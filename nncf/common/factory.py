@@ -16,10 +16,6 @@ from typing import Optional, List, Tuple, Any
 from nncf.api.compression import ModelType
 from nncf.common.exporter import Exporter
 from nncf.common.utils.backend import __nncf_backend__
-if __nncf_backend__ == 'Torch':
-    from nncf.torch.exporter import PTExporter
-elif __nncf_backend__ == 'TensorFlow':
-    from nncf.tensorflow.exporter import TFExporter
 
 
 def create_exporter(model: ModelType,
@@ -30,8 +26,10 @@ def create_exporter(model: ModelType,
     Factory to build an exporter.
     """
     if __nncf_backend__ == 'Torch':
+        from nncf.torch.exporter import PTExporter
         exporter = PTExporter(model, input_names, output_names, model_args)
     elif __nncf_backend__ == 'TensorFlow':
+        from nncf.tensorflow.exporter import TFExporter
         exporter = TFExporter(model, input_names, output_names, model_args)
 
     return exporter

@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 from nncf.config import NNCFConfig
 from nncf.tensorflow.helpers.model_creation import create_compressed_model
-from nncf.helpers.callback_creation import create_compression_callbacks
+from nncf.tensorflow.helpers.callback_creation import create_compression_callbacks
 from nncf.tensorflow.sparsity.rb.loss import SparseLoss
 from nncf.tensorflow.sparsity.rb.operation import RBSparsifyingWeight
 from nncf.tensorflow.sparsity.rb.functions import calc_rb_binary_mask

@@ -14,9 +14,9 @@
 from typing import List, Type
 
 from nncf.common.graph.operator_metatypes import OperatorMetatype
-from beta.nncf.tensorflow.graph.metatypes import keras_layers as layer_metatypes
-from beta.nncf.tensorflow.graph.metatypes import nncf_op as nncf_op_metatypes
-from beta.nncf.tensorflow.graph.metatypes import tf_ops as op_metatypes
+from nncf.tensorflow.graph.metatypes import keras_layers as layer_metatypes
+from nncf.tensorflow.graph.metatypes import nncf_op as nncf_op_metatypes
+from nncf.tensorflow.graph.metatypes import tf_ops as op_metatypes
 
 ALL_LAYER_METATYPES_WITH_WEIGHTS = [
     layer_metatypes.TFConv1DLayerMetatype,

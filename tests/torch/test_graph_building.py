@@ -19,7 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from nncf import nncf_model_input
+from nncf.torch import nncf_model_input
 from nncf.torch.graph.graph import PTNNCFGraph
 from nncf.torch.dynamic_graph.graph_tracer import ModelInputInfo
 from nncf.torch.dynamic_graph.graph_tracer import create_dummy_forward_fn

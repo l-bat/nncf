@@ -11,12 +11,12 @@
  limitations under the License.
 """
 
-from beta.nncf.tensorflow.graph.converter import convert_keras_model_to_nncf_graph
-from beta.nncf.tensorflow.graph.metatypes.common import get_input_metatypes
-from beta.nncf.tensorflow.graph.metatypes.common import get_output_metatypes
-from beta.tests.tensorflow.helpers import get_basic_conv_test_model
-from beta.tests.tensorflow.helpers import create_compressed_model_and_algo_for_test
-from beta.tests.tensorflow.quantization.test_algorithm_quantization import get_basic_quantization_config
+from nncf.tensorflow.graph.converter import convert_keras_model_to_nncf_graph
+from nncf.tensorflow.graph.metatypes.common import get_input_metatypes
+from nncf.tensorflow.graph.metatypes.common import get_output_metatypes
+from tests.tensorflow.helpers import get_basic_conv_test_model
+from tests.tensorflow.helpers import create_compressed_model_and_algo_for_test
+from tests.tensorflow.quantization.test_algorithm_quantization import get_basic_quantization_config
 
 
 def test_struct_auxiliary_nodes_nncf_graph():

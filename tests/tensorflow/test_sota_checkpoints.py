@@ -318,7 +318,7 @@ class TestSotaCheckpoints:
             metrics = json.load(metric_file)
         return metrics['Accuracy']
 
-    sota_eval_config = json.load(open('{}/sota_checkpoints_eval.json'.format(TEST_ROOT)),
+    sota_eval_config = json.load(open('{}/tensorflow/sota_checkpoints_eval.json'.format(TEST_ROOT)),
                                  object_pairs_hook=OrderedDict)
     for sample_type_ in sota_eval_config:
         datasets = sota_eval_config[sample_type_]

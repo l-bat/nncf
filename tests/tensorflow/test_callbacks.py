@@ -18,7 +18,7 @@ import pytest
 import tensorflow as tf
 
 from nncf.tensorflow.callbacks.checkpoint_callback import CheckpointManagerCallback
-from nncf.helpers.callback_creation import create_compression_callbacks
+from nncf.tensorflow.helpers.callback_creation import create_compression_callbacks
 from nncf.tensorflow.helpers.model_creation import create_compressed_model
 from tests.tensorflow.helpers import get_basic_conv_test_model
 from tests.tensorflow.helpers import get_empty_config

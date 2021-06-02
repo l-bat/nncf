@@ -29,7 +29,7 @@ from nncf.torch.graph.operator_metatypes import InputNoopMetatype, OutputNoopMet
 from nncf.torch.graph.operator_metatypes import ReshapeMetatype
 from torch import nn
 
-from nncf import register_module
+from nncf.torch import register_module
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.torch.dynamic_graph.context import PreHookId
 from nncf.torch.dynamic_graph.context import Scope

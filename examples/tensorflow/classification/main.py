@@ -18,8 +18,8 @@ from pathlib import Path
 import tensorflow as tf
 import tensorflow_addons as tfa
 
-from nncf.tensorflow.model_creation import create_compressed_model
-from nncf import create_compression_callbacks
+from nncf.tensorflow.helpers.model_creation import create_compressed_model
+from nncf.tensorflow import create_compression_callbacks
 from nncf.tensorflow.helpers.model_manager import TFOriginalModelManager
 
 from examples.tensorflow.classification.datasets.builder import DatasetBuilder

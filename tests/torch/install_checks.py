@@ -14,7 +14,7 @@
 # Do not remove - these imports are for testing purposes.
 #pylint:disable=unused-import
 import nncf
-from nncf import create_compressed_model
+from nncf.torch import create_compressed_model
 
 import sys
 
@@ -32,8 +32,12 @@ threshold_tensor = torch.zeros([1, 1, 1, 1])
 levels = 256
 
 if execution_type == "cpu":
-    from nncf.torch.binarization.extensions import BinarizedFunctionsCPU
-    from nncf.torch.quantization.extensions import QuantizedFunctionsCPU
+    try:
+        from nncf.torch.binarization.extensions import BinarizedFunctionsCPU
+        from nncf.torch.quantization.extensions import QuantizedFunctionsCPU
+    except ImportError:
+        from nncf.binarization.extensions import BinarizedFunctionsCPU
+        from nncf.quantization.extensions import QuantizedFunctionsCPU
     output_tensor = QuantizedFunctionsCPU.Quantize_forward(input_tensor, input_low_tensor, input_high_tensor, levels)
     output_tensor = BinarizedFunctionsCPU.ActivationBinarize_forward(output_tensor, scale_tensor, threshold_tensor)
     output_tensor = BinarizedFunctionsCPU.WeightBinarize_forward(output_tensor, True)
@@ -43,8 +47,12 @@ elif execution_type == "cuda":
     input_high_tensor = input_high_tensor.cuda()
     scale_tensor = scale_tensor.cuda()
     threshold_tensor = threshold_tensor.cuda()
-    from nncf.torch.binarization.extensions import BinarizedFunctionsCUDA
-    from nncf.torch.quantization.extensions import QuantizedFunctionsCUDA
+    try:
+        from nncf.torch.binarization.extensions import BinarizedFunctionsCUDA
+        from nncf.torch.quantization.extensions import QuantizedFunctionsCUDA
+    except ImportError:
+        from nncf.binarization.extensions import BinarizedFunctionsCUDA
+        from nncf.quantization.extensions import QuantizedFunctionsCUDA
     output_tensor = QuantizedFunctionsCUDA.Quantize_forward(input_tensor, input_low_tensor, input_high_tensor, levels)
     output_tensor = BinarizedFunctionsCUDA.ActivationBinarize_forward(output_tensor, scale_tensor, threshold_tensor)
     output_tensor = BinarizedFunctionsCUDA.WeightBinarize_forward(output_tensor, True)

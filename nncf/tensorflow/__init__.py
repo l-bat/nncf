@@ -11,8 +11,17 @@
  limitations under the License.
 """
 
+from nncf.tensorflow.version import __version__
+from nncf.tensorflow.backend import backend
+
+from nncf.tensorflow.helpers import create_compressed_model
+from nncf.tensorflow.helpers.callback_creation import create_compression_callbacks
+
 # Required for correct COMPRESSION_ALGORITHMS registry functioning
 from nncf.tensorflow.quantization import algorithm as quantization_algorithm
 from nncf.tensorflow.sparsity.magnitude import algorithm as magnitude_sparsity_algorithm
 from nncf.tensorflow.pruning.filter_pruning import algorithm as filter_pruning_algorithm
 from nncf.tensorflow.sparsity.rb import algorithm as rb_sparsity_algorithm
+
+from tensorflow.python.keras.engine import keras_tensor
+keras_tensor.disable_keras_tensors()

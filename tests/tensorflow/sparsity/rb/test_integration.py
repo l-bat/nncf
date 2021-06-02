@@ -21,7 +21,7 @@ from nncf.config import NNCFConfig
 from nncf.tensorflow.helpers.model_creation import create_compressed_model
 from nncf.common.composite_compression import CompositeCompressionAlgorithmController
 from examples.tensorflow.common.callbacks import get_callbacks, get_progress_bar
-from nncf.helpers.callback_creation import create_compression_callbacks
+from nncf.tensorflow.helpers.callback_creation import create_compression_callbacks
 
 
 MODEL_PATH = Path(__file__).parent.parent.parent / 'data' / 'mock_models' / 'LeNet.h5'
