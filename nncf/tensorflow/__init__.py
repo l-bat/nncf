@@ -11,7 +11,6 @@
  limitations under the License.
 """
 
-from nncf.tensorflow.version import __version__
 from nncf.tensorflow.backend import backend
 
 from nncf.tensorflow.helpers import create_compressed_model

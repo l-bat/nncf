@@ -63,37 +63,38 @@ if python_version < (3, 6):
 
 version_string = "{}{}".format(sys.version_info[0], sys.version_info[1])
 
-if "--cpu-only" in sys.argv:
-    print("WARNING: --cpu-only option for NNCF setup.py is deprecated and will "
-          "be ignored. CPU/GPU support will be determined by the torch package.")
-    sys.argv.remove("--cpu-only")
+_extra_deps = [
+    "torch>=1.5.0, <=1.8.1, !=1.8.0",
+    "tensorflow==2.4.0",
+]
 
-if not os.environ.get('NNCF_SKIP_INSTALLING_TORCH'):
-    INSTALL_REQUIRES.extend(["torch>=1.5.0, <=1.8.1, !=1.8.0"])
-else:
-    print("Skipping torch installation for NNCF.")
-    DEPENDENCY_LINKS = []
-
+extra_deps = {b: a for a, b in (re.findall(r"^(([^!=<>]+)(?:[!=<>].*)?$)", x)[0] for x in _extra_deps)}
 
 EXTRAS_REQUIRE = {
     "tests": [
         "pytest"],
-    "docs": []
+    "docs": [],
+    "tf": [
+        extra_deps["tensorflow"]],
+    "torch": [
+        extra_deps["torch"]],
+    "all": [
+        extra_deps["tensorflow"],
+        extra_deps["torch"]],
 }
 
 setup(
     name="nncf",
-    version=find_version(os.path.join(here, "nncf/torch/version.py")),
+    version=find_version(os.path.join(here, "nncf/version.py")),
     author="Intel",
     author_email="alexander.kozlov@intel.com",
     description="Neural Networks Compression Framework",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/openvinotoolkit/nncf_pytorch",
+    url="https://github.com/openvinotoolkit/nncf",
     packages=find_packages(exclude=["tests", "tests.*",
                                     "examples", "examples.*",
-                                    "tools", "tools.*",
-                                    "nncf.tensorflow", "nncf.tensorflow.*"]),
+                                    "tools", "tools.*"]),
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Apache Software License",

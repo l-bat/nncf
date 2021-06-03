@@ -11,7 +11,6 @@
  limitations under the License.
 """
 
-from nncf.torch.version import __version__
 from nncf.torch.version import BKC_TORCH_VERSION
 
 import torch

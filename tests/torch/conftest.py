@@ -194,12 +194,13 @@ def tmp_venv_with_nncf(install_type, tmp_path, package_type, venv_type):  # pyli
         subprocess.run(
             f"{pip_with_venv} install {PROJECT_ROOT}", check=True, shell=True)
     elif package_type == "pip_e_local":
+        print( f"{pip_with_venv} install -e {PROJECT_ROOT}/packaging")
         subprocess.run(
             f"{pip_with_venv} install -e {PROJECT_ROOT}", check=True, shell=True)
     else:
 
         subprocess.run(
-            "{python} {nncf_repo_root}/setup.py {package_type} {install_flag}".format(
+            "{python} {nncf_repo_root}/packaging/setup_pt.py {package_type} {install_flag}".format(
                 python=python_executable_with_venv,
                 nncf_repo_root=PROJECT_ROOT,
                 package_type=package_type,
