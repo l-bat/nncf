@@ -232,6 +232,9 @@ class TFModelTransformer(ModelTransformer):
         replace_layer_name = replace_layer_config['name']
         for layer in self._model_config['layers']:
             for inbound_node in layer['inbound_nodes']:
+                if not isinstance(inbound_node[0], list):
+                    inbound_node = [inbound_node]
+                # print(inbound_node)
                 self._process_replacement(inbound_node, layer_name, replace_layer_name)
 
         self._replace_in_model_outputs(layer_name, replace_layer_name)
@@ -266,6 +269,9 @@ class TFModelTransformer(ModelTransformer):
         replace_layer_name = layer_config['name']
         for layer in self._model_config['layers']:
             for inbound_node in layer['inbound_nodes']:
+                if not isinstance(inbound_node[0], list):
+                    inbound_node = [inbound_node]
+
                 self._process_insertion_after(inbound_node, layer_name, instance_index,
                                               layer_out_ports, replace_layer_name)
 

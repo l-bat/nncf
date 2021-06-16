@@ -35,5 +35,5 @@ from nncf.tensorflow.sparsity.magnitude import algorithm as magnitude_sparsity_a
 from nncf.tensorflow.pruning.filter_pruning import algorithm as filter_pruning_algorithm
 from nncf.tensorflow.sparsity.rb import algorithm as rb_sparsity_algorithm
 
-from tensorflow.python.keras.engine import keras_tensor
-keras_tensor.disable_keras_tensors()
+# from tensorflow.python.keras.engine import keras_tensor
+# keras_tensor.disable_keras_tensors()

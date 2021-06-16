@@ -46,8 +46,10 @@ def _restore_baseline_weights(keras_model, checkpoint_path):
             if var_name == key:
                 match_names.append(x)
 
-        if len(match_names) != 1:
+        if len(match_names) > 1:
             raise Exception('More than one matches for {}: {}'.format(v, match_names))
+        elif len(match_names) == 0:
+            raise Exception('No matches for {}: {}'.format(v, match_names))
 
         assignment_map[match_names[0]] = v
 

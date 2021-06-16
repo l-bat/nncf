@@ -372,14 +372,14 @@ class GenericDetectionGenerator:
         class_outputs = tf.slice(class_outputs, [0, 0, 1], [-1, -1, -1])
         box_outputs = tf.reshape(
             box_outputs,
-            tf.stack([batch_size, num_locations, num_classes, 4], axis=-1))
+            tf.stack([batch_size, num_locations, num_classes, 4], axis=0))
         box_outputs = tf.slice(box_outputs, [0, 0, 1, 0], [-1, -1, -1, -1])
         anchor_boxes = tf.tile(
             tf.expand_dims(anchor_boxes, axis=2), [1, 1, num_classes - 1, 1])
         box_outputs = tf.reshape(box_outputs,
-                                tf.stack([batch_size, num_detections, 4], axis=-1))
+                                tf.stack([batch_size, num_detections, 4], axis=0))
         anchor_boxes = tf.reshape(
-            anchor_boxes, tf.stack([batch_size, num_detections, 4], axis=-1))
+            anchor_boxes, tf.stack([batch_size, num_detections, 4], axis=0))
 
         # Box decoding.
         decoded_boxes = box_utils.decode_boxes(
@@ -390,7 +390,7 @@ class GenericDetectionGenerator:
 
         decoded_boxes = tf.reshape(
             decoded_boxes,
-            tf.stack([batch_size, num_locations, num_classes - 1, 4], axis=-1))
+            tf.stack([batch_size, num_locations, num_classes - 1, 4], axis=0))
 
         nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections = (
             self._generate_detections(decoded_boxes, class_outputs))
