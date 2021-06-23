@@ -36,10 +36,12 @@ def _build_assignment_map(keras_model, prefix='', skip_variables_regex=None, var
     """
     assignment_map = {}
 
-    checkpoint_names = None
+    checkpoint_names = []
     if var_to_shape_map:
         predicate = lambda x: not x.endswith('Momentum') and not x.endswith('global_step')
         checkpoint_names = list(filter(predicate, var_to_shape_map.keys()))
+
+    logger.info('Number of variables in the checkpoint %d', len(checkpoint_names))
 
     for var in keras_model.variables:
         var_name = var.name
@@ -75,7 +77,7 @@ def _build_assignment_map(keras_model, prefix='', skip_variables_regex=None, var
             logger.info('Exception: %s', ex)
             raise
 
-    logger.info('Found variable in checkpoint: %d', len(assignment_map))
+    logger.info('Found matching variable in checkpoint: %d', len(assignment_map))
 
     return assignment_map
 

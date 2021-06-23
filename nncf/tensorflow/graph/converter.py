@@ -181,7 +181,6 @@ class FunctionalConverter(TFModelConverter):
             layer = self._get_layer(layer_name)
             if layer_config['inbound_nodes']:
                 instances_count = len(layer_config['inbound_nodes'])
-                # print('inbound_nodes', layer_config['inbound_nodes'])
                 is_shared = instances_count > 1
                 for i in range(instances_count):
                     node_name = get_shared_node_name(layer_name, i) if is_shared else layer_name
@@ -216,7 +215,6 @@ class FunctionalConverter(TFModelConverter):
         for layer_config in model_config['layers']:
             layer_name = layer_config['name']
             for layer_instance_idx, instance_input_info in enumerate(layer_config['inbound_nodes']):
-                print(instance_input_info)
                 if not isinstance(instance_input_info[0], list):
                     instance_input_info = [instance_input_info]
 
@@ -225,9 +223,6 @@ class FunctionalConverter(TFModelConverter):
                 else:
                     node_name = layer_name
                 input_shapes = self._node_info[node_name]['input_shapes']
-                # for layer_instance_input_port_id, inbound_node in enumerate(instance_input_info):
-                #     print("port =", layer_instance_input_port_id, inbound_node)
-
                 for layer_instance_input_port_id, inbound_node in enumerate(instance_input_info):
                     producer_layer_name, producer_layer_instance, *_ = inbound_node
                     if self._is_layer_shared(producer_layer_name):

@@ -141,7 +141,9 @@ def create_train_step_fn(strategy, model, loss_fn, optimizer):
             per_replica_loss = losses['total_loss'] / strategy.num_replicas_in_sync
 
         grads = tape.gradient(per_replica_loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        # optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        clipped_grads, _ = tf.clip_by_global_norm(grads, clip_norm=1.0)
+        optimizer.apply_gradients(zip(clipped_grads, model.trainable_variables))
         return losses
 
     @tf.function

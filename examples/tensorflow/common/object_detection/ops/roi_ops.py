@@ -165,23 +165,28 @@ def multilevel_propose_rois(rpn_boxes,
         return selected_rois, selected_roi_scores
 
 
-class ROIGenerator:
+class ROIGenerator(tf.keras.layers.Layer):
     """Proposes RoIs for the second stage processing."""
 
     def __init__(self, params):
-        self._rpn_pre_nms_top_k = params.rpn_pre_nms_top_k
-        self._rpn_post_nms_top_k = params.rpn_post_nms_top_k
-        self._rpn_nms_threshold = params.rpn_nms_threshold
-        self._rpn_score_threshold = params.rpn_score_threshold
-        self._rpn_min_size_threshold = params.rpn_min_size_threshold
-        self._test_rpn_pre_nms_top_k = params.test_rpn_pre_nms_top_k
-        self._test_rpn_post_nms_top_k = params.test_rpn_post_nms_top_k
-        self._test_rpn_nms_threshold = params.test_rpn_nms_threshold
-        self._test_rpn_score_threshold = params.test_rpn_score_threshold
-        self._test_rpn_min_size_threshold = params.test_rpn_min_size_threshold
-        self._use_batched_nms = params.use_batched_nms
+        super(ROIGenerator, self).__init__(autocast=False)
+        self._params = params
+        self._rpn_pre_nms_top_k = params['rpn_pre_nms_top_k']
+        self._rpn_post_nms_top_k = params['rpn_post_nms_top_k']
+        self._rpn_nms_threshold = params['rpn_nms_threshold']
+        self._rpn_score_threshold = params['rpn_score_threshold']
+        self._rpn_min_size_threshold = params['rpn_min_size_threshold']
+        self._test_rpn_pre_nms_top_k = params['test_rpn_pre_nms_top_k']
+        self._test_rpn_post_nms_top_k = params['test_rpn_post_nms_top_k']
+        self._test_rpn_nms_threshold = params['test_rpn_nms_threshold']
+        self._test_rpn_score_threshold = params['test_rpn_score_threshold']
+        self._test_rpn_min_size_threshold = params['test_rpn_min_size_threshold']
+        self._use_batched_nms = params['use_batched_nms']
 
-    def __call__(self, boxes, scores, anchor_boxes, image_shape, is_training):
+    def get_config(self):
+        return {'params': dict(self._params)}
+
+    def call(self, boxes, scores, anchor_boxes, image_shape, is_training):
         """Generates RoI proposals.
 
         Args:

@@ -17,7 +17,6 @@ from examples.tensorflow.common.logger import logger
 from examples.tensorflow.common.object_detection import base_model
 from examples.tensorflow.common.object_detection import losses
 from examples.tensorflow.common.object_detection.architecture import factory
-from examples.tensorflow.common.object_detection.architecture import keras_utils
 from examples.tensorflow.common.object_detection.evaluation import coco_evaluator
 from examples.tensorflow.common.object_detection.ops import postprocess_ops
 from examples.tensorflow.common.object_detection.ops import roi_ops
@@ -49,7 +48,7 @@ def _restore_baseline_weights(keras_model, checkpoint_path):
         if len(match_names) > 1:
             raise Exception('More than one matches for {}: {}'.format(v, match_names))
         elif len(match_names) == 0:
-            raise Exception('No matches for {}: {}'.format(v, match_names))
+            raise Exception('No matches for {}'.format(v))
 
         assignment_map[match_names[0]] = v
 
@@ -314,9 +313,8 @@ class MaskrcnnModel(base_model.Model):
 
     def build_model(self, weights=None, is_training=None):
         input_layers = self.build_input_layers(self._params, is_training)
-        with keras_utils.maybe_enter_backend_graph():
-            outputs = self.model_outputs(input_layers, is_training)
-            keras_model = tf.keras.models.Model(inputs=input_layers, outputs=outputs, name='maskrcnn')
+        outputs = self.model_outputs(input_layers, is_training)
+        keras_model = tf.keras.models.Model(inputs=input_layers, outputs=outputs, name='maskrcnn')
 
         if self._checkpoint_path:
             logger.info('Init backbone')

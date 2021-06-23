@@ -20,19 +20,19 @@ from examples.tensorflow.common.object_detection.utils import box_utils
 
 def generate_detections_factory(params):
     """Factory to select function to generate detection."""
-    if params.use_batched_nms:
+    if params['use_batched_nms']:
         func = functools.partial(
             _generate_detections_batched,
-            max_total_size=params.max_total_size,
-            nms_iou_threshold=params.nms_iou_threshold,
-            score_threshold=params.score_threshold)
+            max_total_size=params['max_total_size'],
+            nms_iou_threshold=params['nms_iou_threshold'],
+            score_threshold=params['score_threshold'])
     else:
         func = functools.partial(
             _generate_detections,
-            max_total_size=params.max_total_size,
-            nms_iou_threshold=params.nms_iou_threshold,
-            score_threshold=params.score_threshold,
-            pre_nms_num_boxes=params.pre_nms_num_boxes)
+            max_total_size=params['max_total_size'],
+            nms_iou_threshold=params['nms_iou_threshold'],
+            score_threshold=params['score_threshold'],
+            pre_nms_num_boxes=params['pre_nms_num_boxes'])
     return func
 
 
@@ -281,15 +281,16 @@ def _generate_detections_batched(boxes, scores, max_total_size,
     return nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections
 
 
-class MultilevelDetectionGenerator:
+class MultilevelDetectionGenerator(tf.keras.layers.Layer):
     """Generates detected boxes with scores and classes for one-stage detector."""
 
     def __init__(self, min_level, max_level, params):
         self._min_level = min_level
         self._max_level = max_level
         self._generate_detections = generate_detections_factory(params)
+        super(MultilevelDetectionGenerator, self).__init__(autocast=False)
 
-    def __call__(self, box_outputs, class_outputs, anchor_boxes, image_shape):
+    def call(self, box_outputs, class_outputs, anchor_boxes, image_shape):
         # Collects outputs from all levels into a list.
         boxes = []
         scores = []
@@ -329,13 +330,18 @@ class MultilevelDetectionGenerator:
         return nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections
 
 
-class GenericDetectionGenerator:
+class GenericDetectionGenerator(tf.keras.layers.Layer):
     """Generates the final detected boxes with scores and classes."""
 
     def __init__(self, params):
+        super(GenericDetectionGenerator, self).__init__(autocast=False)
+        self._params = params
         self._generate_detections = generate_detections_factory(params)
 
-    def __call__(self, box_outputs, class_outputs, anchor_boxes, image_shape):
+    def get_config(self):
+        return {'params': dict(self._params)}
+
+    def call(self, box_outputs, class_outputs, anchor_boxes, image_shape):
         """Generate final detections.
 
         Args:

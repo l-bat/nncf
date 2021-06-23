@@ -286,18 +286,23 @@ def sample_and_crop_foreground_masks(candidate_rois,
         return foreground_rois, foreground_classes, cropped_foreground_masks
 
 
-class ROISampler:
+class ROISampler(tf.keras.layers.Layer):
     """Samples RoIs and creates training targets."""
 
     def __init__(self, params):
-        self._num_samples_per_image = params.num_samples_per_image
-        self._fg_fraction = params.fg_fraction
-        self._fg_iou_thresh = params.fg_iou_thresh
-        self._bg_iou_thresh_hi = params.bg_iou_thresh_hi
-        self._bg_iou_thresh_lo = params.bg_iou_thresh_lo
-        self._mix_gt_boxes = params.mix_gt_boxes
+        super(ROISampler, self).__init__(autocast=False)
+        self._params = params
+        self._num_samples_per_image = params['num_samples_per_image']
+        self._fg_fraction = params['fg_fraction']
+        self._fg_iou_thresh = params['fg_iou_thresh']
+        self._bg_iou_thresh_hi = params['bg_iou_thresh_hi']
+        self._bg_iou_thresh_lo = params['bg_iou_thresh_lo']
+        self._mix_gt_boxes = params['mix_gt_boxes']
 
-    def __call__(self, rois, gt_boxes, gt_classes):
+    def get_config(self):
+        return {'params': dict(self._params)}
+
+    def call(self, rois, gt_boxes, gt_classes):
         """Sample and assign RoIs for training.
 
         Args:
@@ -338,14 +343,22 @@ class ROISampler:
                 sampled_gt_indices)
 
 
-class MaskSampler:
+class MaskSampler(tf.keras.layers.Layer):
     """Samples and creates mask training targets."""
 
     def __init__(self, mask_target_size, num_mask_samples_per_image):
         self._mask_target_size = mask_target_size
         self._num_mask_samples_per_image = num_mask_samples_per_image
+        super(MaskSampler, self).__init__(autocast=False)
 
-    def __call__(self, candidate_rois, candidate_gt_boxes, candidate_gt_classes,
+    def get_config(self):
+        config = {
+            'mask_target_size': self._mask_target_size,
+            'num_mask_samples_per_image': self._num_mask_samples_per_image,
+        }
+        return config
+
+    def call(self, candidate_rois, candidate_gt_boxes, candidate_gt_classes,
                 candidate_gt_indices, gt_masks):
         """Sample and create mask targets for training.
 
