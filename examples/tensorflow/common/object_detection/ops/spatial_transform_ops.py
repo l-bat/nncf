@@ -414,7 +414,7 @@ def multilevel_crop_and_resize(features, boxes, output_size=7):
             tf.reshape(x_indices, [batch_size, num_boxes, 1, output_size * 2]),
             [1, 1, output_size * 2, 1])
         indices = tf.reshape(
-            batch_size_offset + levels_offset + y_indices_offset + x_indices_offset,
+            levels_offset + y_indices_offset + x_indices_offset + batch_size_offset,
             [-1])
 
         features_per_box = tf.reshape(

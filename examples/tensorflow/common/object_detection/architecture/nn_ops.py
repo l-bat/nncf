@@ -44,7 +44,7 @@ class NormActivation(tf.keras.layers.Layer):
             `relu` and `swish`.
           name: `str` name for the operation.
         """
-        super().__init__(trainable=trainable)
+        super().__init__(trainable=trainable, autocast=False)
 
         if init_zero:
             gamma_initializer = tf.keras.initializers.Zeros()
@@ -68,7 +68,7 @@ class NormActivation(tf.keras.layers.Layer):
         else:
             raise ValueError('Unsupported activation `{}`.'.format(activation))
 
-    def __call__(self, inputs, is_training=None):
+    def call(self, inputs, is_training=None):
         """Builds the normalization layer followed by an optional activation layer.
 
         Args:
@@ -87,6 +87,10 @@ class NormActivation(tf.keras.layers.Layer):
         if self._use_activation:
             inputs = self._activation_op(inputs)
         return inputs
+
+    def get_config(self):
+        config = {'momentum': 0.997}
+        return config
 
 
 def norm_activation_builder(momentum=0.997,

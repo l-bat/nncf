@@ -496,7 +496,7 @@ class MaskrcnnHead(tf.keras.layers.Layer):
                  use_separable_conv=False,
                  activation='relu',
                  use_batch_norm=True,
-                 norm_activation=nn_ops.norm_activation_builder(activation='relu')):
+                 norm_activation=nn_ops.NormActivation(activation='relu')):
         """Initialize params to build Fast R-CNN head.
 
         Args:
@@ -605,11 +605,11 @@ class MaskrcnnHead(tf.keras.layers.Layer):
             for i in range(self._num_convs):
                 net = self._conv2d_ops[i](net)
                 if self._use_batch_norm:
-                    net = self._norm_activation()(net, is_training=is_training)
+                    net = self._norm_activation(net, is_training=is_training)
 
             net = self._mask_conv_transpose(net)
             if self._use_batch_norm:
-                net = self._norm_activation()(net, is_training=is_training)
+                net = self._norm_activation(net, is_training=is_training)
 
             mask_outputs = self._mask_conv2d_op(net)
             mask_outputs = tf.reshape(mask_outputs, [
