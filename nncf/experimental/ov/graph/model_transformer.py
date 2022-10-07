@@ -59,7 +59,6 @@ class OVModelTransformer(ModelTransformer):
 
     def _apply_outputs_transformations(self):
         extra_model_outputs = []
-        print('self.transformed_model.get_results()', self.transformed_model.get_results())
         for transformation in self.output_insertion_commands:
             node_name = transformation.target_point.target_node_name
             node = self.name_to_node_mapping[node_name]

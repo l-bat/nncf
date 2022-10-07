@@ -25,12 +25,14 @@ from nncf.experimental.ov.graph.transformations.layout import OVTransformationLa
 from nncf.experimental.ov.graph.transformations.commands import OVTargetPoint
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.experimental.ov.graph.transformations.commands import OVOutputInsertionCommand
+from nncf.experimental.ov.graph.transformations.commands import OVQuantizerInsertionCommand
 from nncf.experimental.ov.tensor import OVNNCFTensor
 from nncf.experimental.post_training.api.dataset import Dataset, NNCFData
 from nncf.experimental.ov.samplers import OVBatchSampler
 from nncf.experimental.post_training.algorithms.algorithm import PostTrainingAlgorithms
 from nncf.experimental.post_training.statistics.statistic_point import StatisticPoint
 from nncf.experimental.post_training.statistics.statistic_point import StatisticPointsContainer
+from nncf.experimental.ov.algorithms.quantization.utils import calculate_activation_quantizer_parameters
 
 from tests.ov.models import OVLinearModel
 from tests.ov.models import OVMultiInputOutputModel
@@ -125,49 +127,103 @@ def test_output_insertion_post_layer(target_layers, target_layer_outputs):
     for out_name in extra_outputs:
         assert out_name in target_layer_outputs
 
+def create_quantized_model(model, statistics_aggregator, target_points):
+    tensor_collector = OVMinMaxStatisticCollector(use_abs_max=True, reduction_shape=None, num_samples=3)
+    statistic_points = StatisticPointsContainer()
+    transformation_layout = OVTransformationLayout()
 
-@pytest.mark.parametrize('target_layers, target_layer_outputs', zip(TARGET_LAYERS, TARGET_PRE_LAYERS_OUTPUT))
-def test_fq_insertion_pre_layer(target_layers, target_layer_outputs):
+    for target_point in target_points:
+        stat_point = StatisticPoint(target_point=target_point,
+                                    tensor_collector=tensor_collector,
+                                    algorithm=PostTrainingAlgorithms.MinMaxQuantization)
+        statistic_points.add_statistic_point(stat_point)
+    statistics_aggregator.register_stastistic_points(statistic_points)
+    statistics_aggregator.collect_statistics(model)
+
+    for algo_stat_points in statistic_points.values():
+        for statistic_point in algo_stat_points:
+            for tensor_collector in statistic_point.algorithm_to_tensor_collectors[PostTrainingAlgorithms.MinMaxQuantization]:
+                parameters = calculate_activation_quantizer_parameters(tensor_collector.get_statistics(), num_bits=8)
+                transformation_commands = OVQuantizerInsertionCommand(statistic_point.target_point, parameters)
+                transformation_layout.register(transformation_commands)
+
+    model_transformer = OVModelTransformer(model)
+    quantized_model = model_transformer.transform(transformation_layout)
+    return quantized_model
+
+
+@pytest.mark.parametrize('target_layers', TARGET_LAYERS)
+def test_fq_insertion_pre_layer(target_layers):
     model = OVMultiResultModel()
-    transformed_model = create_transformed_model(model, target_layers, TargetType.PRE_LAYER_OPERATION)
-    extra_outputs = get_extra_outputs(model.ov_model, transformed_model)
 
-    assert len(extra_outputs) == len(target_layer_outputs)
-    for out_name in extra_outputs:
-        assert out_name in target_layer_outputs
-
-
-@pytest.mark.parametrize('target_layers, target_layer_outputs', zip(TARGET_LAYERS, TARGET_LAYERS_OUTPUT))
-def test_compute_statistics(target_layers, target_layer_outputs):
-    model = OVMultiResultModel()
     engine = OVEngine()
     dataset = TestDataset(DATASET_SAMPLES)
-
-    statistic_points = StatisticPointsContainer()
-    tensor_collector = OVMinMaxStatisticCollector(use_abs_max=True, reduction_shape=None, num_samples=2)
-    for target_layer in target_layers:
-        target_point = OVTargetPoint(TargetType.PRE_LAYER_OPERATION, target_layer)
-        statistic_points.add_statistic_point(StatisticPoint(target_point=target_point,
-                                                            tensor_collector=tensor_collector,
-                                                            algorithm=PostTrainingAlgorithms.MinMaxQuantization))
-
     statistics_aggregator = OVStatisticsAggregator(engine, dataset)
-    statistics_aggregator.register_stastistic_points(statistic_points)
-    statistics_aggregator.collect_statistics(model.ov_model)
-    print('statistics_aggregator.statistic_points', statistics_aggregator.statistic_points)
 
-    def filter_func(point):
-        return PostTrainingAlgorithms.MinMaxQuantization in point.algorithm_to_tensor_collectors
+    target_type = TargetType.PRE_LAYER_OPERATION
+    port_id = 0
+    target_points = [OVTargetPoint(target_type, op, port_id=port_id) for op in target_layers]
 
-    for target_layer in target_layers:
-        print('target_layer', target_layer)
-        for tensor_collector in statistics_aggregator.statistic_points.iter_through_algorithm_tensor_collectors_in_target_node(
-                            target_layer, filter_func, PostTrainingAlgorithms.MinMaxQuantization):
-            statistics = tensor_collector.get_statistics()
-            input_low = statistics.min_values
-            input_high = statistics.max_values
-            print('low', input_low)
-            print('high', input_high)
+    quantized_model = create_quantized_model(model.ov_model, statistics_aggregator, target_points)
+
+    for op in quantized_model.get_ops():
+        if op.get_friendly_name() in target_layers:
+            inp_node = op.input_value(port_id).get_node()
+            assert inp_node.get_type_name() == 'FakeQuantize'
+
+
+@pytest.mark.parametrize('target_layers', TARGET_LAYERS)
+def test_fq_insertion_post_layer(target_layers):
+    model = OVMultiResultModel()
+
+    engine = OVEngine()
+    dataset = TestDataset(DATASET_SAMPLES)
+    statistics_aggregator = OVStatisticsAggregator(engine, dataset)
+
+    target_type = TargetType.POST_LAYER_OPERATION
+    port_id = 0
+    target_points = [OVTargetPoint(target_type, op, port_id=port_id) for op in target_layers]
+
+    quantized_model = create_quantized_model(model.ov_model, statistics_aggregator, target_points)
+
+    for op in quantized_model.get_ops():
+        if op.get_friendly_name() in target_layers:
+            out_nodes = op.output(port_id).get_target_inputs()
+            for out_node in out_nodes:
+                assert out_node.get_type_name() == 'FakeQuantize'
+
+
+# @pytest.mark.parametrize('target_layers, target_layer_outputs', zip(TARGET_LAYERS, TARGET_LAYERS_OUTPUT))
+# def test_compute_statistics(target_layers, target_layer_outputs):
+#     model = OVMultiResultModel()
+#     engine = OVEngine()
+#     dataset = TestDataset(DATASET_SAMPLES)
+
+#     statistic_points = StatisticPointsContainer()
+#     tensor_collector = OVMinMaxStatisticCollector(use_abs_max=True, reduction_shape=None, num_samples=2)
+#     for target_layer in target_layers:
+#         target_point = OVTargetPoint(TargetType.PRE_LAYER_OPERATION, target_layer)
+#         statistic_points.add_statistic_point(StatisticPoint(target_point=target_point,
+#                                                             tensor_collector=tensor_collector,
+#                                                             algorithm=PostTrainingAlgorithms.MinMaxQuantization))
+
+#     statistics_aggregator = OVStatisticsAggregator(engine, dataset)
+#     statistics_aggregator.register_stastistic_points(statistic_points)
+#     statistics_aggregator.collect_statistics(model.ov_model)
+#     print('statistics_aggregator.statistic_points', statistics_aggregator.statistic_points)
+
+#     def filter_func(point):
+#         return PostTrainingAlgorithms.MinMaxQuantization in point.algorithm_to_tensor_collectors
+
+#     for target_layer in target_layers:
+#         print('target_layer', target_layer)
+#         for tensor_collector in statistics_aggregator.statistic_points.iter_through_algorithm_tensor_collectors_in_target_node(
+#                             target_layer, filter_func, PostTrainingAlgorithms.MinMaxQuantization):
+#             statistics = tensor_collector.get_statistics()
+#             input_low = statistics.min_values
+#             input_high = statistics.max_values
+#             print('low', input_low)
+#             print('high', input_high)
 
 
 
