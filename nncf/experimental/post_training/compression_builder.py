@@ -53,6 +53,9 @@ class CompressionBuilder:
         if backend == BackendType.ONNX:
             from nncf.experimental.onnx.engine import ONNXEngine
             return ONNXEngine()
+        elif backend == BackendType.OPENVINO:
+            from nncf.openvino.engine import OVEngine  # pylint: disable=cyclic-import
+            return OVEngine()
         return None
 
     def _create_statistics_aggregator(self,
@@ -72,6 +75,10 @@ class CompressionBuilder:
             from nncf.experimental.onnx.statistics.aggregator import \
                 ONNXStatisticsAggregator
             return ONNXStatisticsAggregator(engine, dataset)
+        elif backend == BackendType.OPENVINO:
+            from nncf.openvino.statistics.aggregator import \
+                OVStatisticsAggregator  # pylint: disable=cyclic-import
+            return OVStatisticsAggregator(engine, dataset)
         return None
 
     def _create_model_transformer(self, model: ModelType, backend: BackendType) -> ModelTransformer:
@@ -92,6 +99,8 @@ class CompressionBuilder:
         if backend == BackendType.ONNX:
             from nncf.experimental.onnx.model_normalizer import ONNXModelNormalizer
             return ONNXModelNormalizer.normalize_model(model, self.convert_opset_version)
+        elif backend == BackendType.OPENVINO:
+            return model
 
         return None
 
