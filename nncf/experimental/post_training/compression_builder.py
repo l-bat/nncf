@@ -54,7 +54,7 @@ class CompressionBuilder:
             from nncf.experimental.onnx.engine import ONNXEngine
             return ONNXEngine()
         elif backend == BackendType.OPENVINO:
-            from nncf.openvino.engine import OVEngine  # pylint: disable=cyclic-import
+            from nncf.openvino.engine import OVEngine
             return OVEngine()
         return None
 
@@ -93,6 +93,9 @@ class CompressionBuilder:
             from nncf.experimental.onnx.graph.model_transformer import \
                 ONNXModelTransformer
             return ONNXModelTransformer(model)
+        elif backend == BackendType.OPENVINO:
+            from nncf.openvino.graph.model_transformer import OVModelTransformer
+            return OVModelTransformer(model)
         return None
 
     def _get_prepared_model_for_compression(self, model: TModel, backend: BackendType) -> TModel:
