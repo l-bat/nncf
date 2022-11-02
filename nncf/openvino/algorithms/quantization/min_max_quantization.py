@@ -88,13 +88,8 @@ class OpenVINOMinMaxQuantization(MinMaxQuantization):
         ip_graph = ip_graph.get_ip_graph_with_merged_hw_optimized_operations(pattern)
 
         weight_nodes = self.nncf_graph.get_nodes_by_metatypes(QUANTIZATION_LAYER_METATYPES)
-        for node in weight_nodes:
-            print(' ***** node', len(self.nncf_graph.get_input_edges(node)))
-            if len(self.nncf_graph.get_input_edges(node)) == 2:  # op w/o weights
-                weight_nodes.remove(node)
-
-        quantizable_layer_nodes = [QuantizableWeightedLayerNode(weight_node, [QuantizerConfig()]) for weight_node in
-                                   weight_nodes]
+        quantizable_layer_nodes = [QuantizableWeightedLayerNode(node, [QuantizerConfig()])
+                                    for node in weight_nodes if len(self.nncf_graph.get_input_edges(node)) == 1]
 
         hw_config_type = self.target_device
         hw_config_path = OVHWConfig.get_path_to_hw_config(hw_config_type)
@@ -114,18 +109,19 @@ class OpenVINOMinMaxQuantization(MinMaxQuantization):
         final_setup = solver.get_final_quantizer_setup(finalized_proposal)
         return final_setup
 
-    def _determine_weight_port(self, node):
-        for i, inp in enumerate(node.input_values()):
-            if inp.node.get_type_name() == 'Constant':
-                return i
-        raise RuntimeError
+    def _determine_weight_port(self, nncf_node):
+        num_edges = nncf_node.layer_attributes.get_input_edges_number()
+        expected_sum = (num_edges - 1) * num_edges / 2
+        actual_sum = sum(map(lambda edge: edge.input_port_id, self.nncf_graph.get_input_edges(nncf_node)))
+        missed_port_id = int(expected_sum - actual_sum)
+        return missed_port_id
 
     def _add_weight_quantization_target_point(self, quantization_point: SingleConfigQuantizationPoint) -> None:
-        # port_id = quantization_point.insertion_point.input_port_id
-        print('FQ', quantization_point.insertion_point.target_node_name)
+        nncf_node = self.nncf_graph.get_node_by_name(quantization_point.insertion_point.target_node_name)
+        weight_port_id = self._determine_weight_port(nncf_node)
         weight_quantization_target_point = OVTargetPoint(TargetType.OPERATION_WITH_WEIGHTS,
-                                                         quantization_point.insertion_point.target_node_name)
-                                                        #  port_id=port_id)
+                                                         quantization_point.insertion_point.target_node_name,
+                                                         port_id=weight_port_id)
         self._quantization_target_points.add(weight_quantization_target_point)
 
     def _add_activation_quantization_target_point(self, quantization_point: SingleConfigQuantizationPoint) -> None:
@@ -174,12 +170,10 @@ class OpenVINOMinMaxQuantization(MinMaxQuantization):
         for quantization_target_point in quantization_target_points:
             target_node_name = quantization_target_point.target_node_name
             if quantization_target_point.type == TargetType.OPERATION_WITH_WEIGHTS:
-                print('target_node_name', target_node_name)
                 weight_node = name_to_node_mapping[target_node_name]
                 weight_port_id = quantization_target_point.port_id
-                print('weight_node', weight_node, weight_port_id)
-                # const_weights = weight_node.input_value(weight_port_id).node
-                weight_tensor = weight_node.get_vector().reshape(weight_node.shape)
+                const_weights = weight_node.input_value(weight_port_id).node
+                weight_tensor = const_weights.get_data()
                 parameters = calculate_weight_quantizer_parameters(weight_tensor, self.weight_quantizer_config)
 
                 command = OVQuantizerInsertionCommand(quantization_target_point, parameters)

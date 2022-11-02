@@ -13,13 +13,14 @@
 import openvino.runtime as ov
 
 from nncf.common.graph import NNCFGraph
-from nncf.common.graph.definitions import NNCFGraphNodeType
-from nncf.common.graph.operator_metatypes import UnknownMetatype
-from nncf.common.graph.layer_attributes import Dtype
 from nncf.common.graph.definitions import MODEL_INPUT_OP_NAME
 from nncf.common.graph.definitions import MODEL_OUTPUT_OP_NAME
+from nncf.common.graph.definitions import NNCFGraphNodeType
+from nncf.common.graph.layer_attributes import BaseLayerAttributes
+from nncf.common.graph.layer_attributes import Dtype
 from nncf.common.graph.operator_metatypes import InputNoopMetatype
 from nncf.common.graph.operator_metatypes import OutputNoopMetatype
+from nncf.common.graph.operator_metatypes import UnknownMetatype
 from nncf.common.utils.logger import logger as nncf_logger
 
 from nncf.openvino.graph.metatypes.ov_metatypes import OV_OPERATION_METATYPES
@@ -184,7 +185,7 @@ class GraphConverter:
                 nncf_graph.add_nncf_node(node_name=node.get_friendly_name(),
                                         node_type=nncf_dtype,
                                         node_metatype=metatype,
-                                        layer_attributes=None)
+                                        layer_attributes=OVLayerAttributes(node.get_input_size()))
 
                 for out in node.outputs():
                     for inp in out.get_target_inputs():
@@ -216,3 +217,17 @@ class GraphConverter:
                         )
 
         return nncf_graph
+
+
+class OVLayerAttributes(BaseLayerAttributes):
+    """
+    This class stores extended attributes of nodes for the algorithms.
+    """
+    def __init__(self, input_edges_number):
+        """
+        :param input_edges_number: Number of the input edges of the node in OpenVINO model.
+        """
+        self.input_edges_number = input_edges_number
+
+    def get_input_edges_number(self) -> int:
+        return self.input_edges_number

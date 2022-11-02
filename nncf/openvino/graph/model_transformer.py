@@ -90,20 +90,19 @@ class OVModelTransformer(ModelTransformer):
         output_high = fq_params.output_high
         levels = fq_params.levels
 
+        target_node = self.name_to_node_mapping[transformation.target_point.target_node_name]
+        port_id = transformation.target_point.port_id
         # TODO: Add FQ name f'FakeQuantize_{transformation.target_point.target_node_name}.{port_id}'
-        if transformation.target_point.type == TargetType.PRE_LAYER_OPERATION:
-            target_node = self.name_to_node_mapping[transformation.target_point.target_node_name]
-            port_id = transformation.target_point.port_id
+        if transformation.target_point.type in [TargetType.PRE_LAYER_OPERATION, TargetType.OPERATION_WITH_WEIGHTS]:
             inp_node = target_node.input(port_id)
             input_node_output = inp_node.get_source_output()
             fq = ov.opset9.fake_quantize(input_node_output, input_low, input_high, output_low, output_high, levels)
             inp_node.replace_source_output(fq.output(0))
         elif transformation.target_point.type == TargetType.POST_LAYER_OPERATION:
-            target_node = self.name_to_node_mapping[transformation.target_point.target_node_name]
-            port_id = transformation.target_point.port_id
             output = target_node.output(port_id)
+            target_inputs = output.get_target_inputs()
             fq = ov.opset9.fake_quantize(output, input_low, input_high, output_low, output_high, levels)
-            for inp_node in output.get_target_inputs():
+            for inp_node in target_inputs:
                 inp_node.replace_source_output(fq.output(0))
         else:
             raise RuntimeError
