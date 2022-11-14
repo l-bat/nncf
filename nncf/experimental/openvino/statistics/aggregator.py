@@ -17,12 +17,12 @@ from nncf.common.utils.logger import logger as nncf_logger
 from nncf.experimental.post_training.api.dataset import Dataset
 from nncf.experimental.post_training.statistics.aggregator import StatisticsAggregator
 from nncf.experimental.post_training.api.sampler import Sampler
-from nncf.openvino.samplers import OVBatchSampler
-from nncf.openvino.samplers import OVRandomBatchSampler
-from nncf.openvino.engine import OVEngine
-from nncf.openvino.graph.model_transformer import OVModelTransformer
-from nncf.openvino.graph.transformations.layout import OVTransformationLayout
-from nncf.openvino.graph.transformations.commands import OVOutputInsertionCommand
+from nncf.experimental.openvino.samplers import OVBatchSampler
+from nncf.experimental.openvino.samplers import OVRandomBatchSampler
+from nncf.experimental.openvino.engine import OVEngine
+from nncf.experimental.openvino.graph.model_transformer import OVModelTransformer
+from nncf.experimental.openvino.graph.transformations.layout import OVTransformationLayout
+from nncf.experimental.openvino.graph.transformations.commands import OVOutputInsertionCommand
 
 
 class OVStatisticsAggregator(StatisticsAggregator):

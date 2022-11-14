@@ -16,7 +16,7 @@ from typing import Type
 
 from nncf.common.graph import OperatorMetatype
 from nncf.common.hardware.config import HWConfig
-from nncf.openvino.graph.metatypes.ov_metatypes import get_operator_metatypes
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import get_operator_metatypes
 
 
 class OVHWConfig(HWConfig):

@@ -11,97 +11,180 @@
  limitations under the License.
 """
 
-from typing import Dict
+from typing import Optional
+from typing import Callable
+from typing import Iterable
+from typing import Any
+from time import time
 
-import numpy as np
-import openvino.runtime as ov
+from openvino.runtime import AsyncInferQueue
+from openvino.tools import pot
 
-from nncf.common.graph.transformations.commands import TargetType
-from nncf.common.graph.definitions import NNCFGraphNodeType
-
-from nncf.experimental.post_training.api.dataset import NNCFData
-from nncf.experimental.post_training.api.engine import Engine
-from nncf.experimental.post_training.api.sampler import Sampler
-from nncf.experimental.post_training.statistics.statistic_point import StatisticPointsContainer
-from nncf.openvino.samplers import create_ov_sampler
-from nncf.openvino.tensor import OVNNCFTensor
+from nncf.api.compression import TModel
+from nncf.data import Dataset
 
 
-class OVEngine(Engine):
+logger = pot.utils.logger.get_logger(__name__)
+
+
+# TODO(andrey-churkin): This class should be removed after refactoring of the OVEngine class.
+# We will be able to do that when we will have moved the POT code in the NNCF.
+class DummyMetric(pot.Metric):
     """
-    Engine for OpenVINO backend using OpenVINO runtime to infer the model.
+    Dummy implementation of the pot.Metric abstract class. It is used for compatibility
+    with the POT API. All docstring for the methods can be
+    found [here](https://docs.openvino.ai/latest/pot_compression_api_README.html#metric).
     """
 
-    def __init__(self):
+    def __init__(self, higher_better: bool = True):
         super().__init__()
-        self._inputs_transforms = lambda input_data: input_data.astype(np.float32)
-        self.sess = None
-        self.input_names = set()
-        self.name_to_node_mapping = {}
-        self.target_device = 'CPU'
+        self._name = 'custom_metric'
+        self._higher_better = higher_better
+        self._avg_value = None
 
-    def get_sampler(self) -> Sampler:
-        # TODO (Nikita Malinin): Replace range calling with the max length variable
-        return self.sampler if self.sampler else create_ov_sampler(self.dataset, len(self.dataset))
+    @property
+    def higher_better(self):
+        return self._higher_better
 
-    def set_model(self, model: ov.Model) -> None:
-        """
-        Creates CompiledModel and InferRequest for the OpenVINO model.
+    @property
+    def avg_value(self):
+        return {self._name: self._avg_value}
 
-        :param model: ov.Model instance
-        """
-        super().set_model(model)
+    @avg_value.setter
+    def avg_value(self, value):
+        self._avg_value = value
 
-        ie = ov.Core()
-        self.compiled_model = ie.compile_model(model=model, device_name=self.target_device)
+    @property
+    def value(self):
+        raise NotImplementedError()
 
-        self.input_names.clear()
-        for inp in model.get_parameters():
-            self.input_names.add(inp.get_friendly_name())
-
-        self.name_to_node_mapping.clear()
-        for op in model.get_ops():
-            self.name_to_node_mapping[op.get_friendly_name()] = op
-
-    def infer(self, input_data: NNCFData) -> NNCFData:
-        """
-        Runs model on the provided input_data via OpenVINO runtime.
-        Returns the dictionary of model outputs by node names.
-
-        :param input_data: inputs for the model transformed with the inputs_transforms
-        :return output_data: models output after outputs_transforms
-        """
-        model_outputs = self.compiled_model(
-            {k: v.tensor for k, v in input_data.items() if k in self.input_names})
-
-        return {
-            out.get_node().get_friendly_name(): OVNNCFTensor(model_outputs[self.compiled_model.output(i)])
-            for i, out in enumerate(model_outputs)
+    def get_attributes(self):
+        attributes = {
+            self._name: {
+                'direction': 'higher-better' if self.higher_better else 'higher-worse',
+                'type': 'user_type',
+            }
         }
+        return attributes
 
-    def _find_output_name_to_node_name_mapping(self, statistic_points: StatisticPointsContainer) -> Dict[str, str]:
-        output_name_to_node_name = {}
-        for node_name, _statistic_points in statistic_points.items():
-            for statistic_point in _statistic_points:
-                port_id = statistic_point.target_point.port_id
-                if statistic_point.target_point.type == TargetType.POST_LAYER_OPERATION:
-                    stat_node_name = node_name
-                elif statistic_point.target_point.type == TargetType.PRE_LAYER_OPERATION:
-                    node = self.name_to_node_mapping[node_name]
-                    stat_node_name = node.input_value(port_id).get_node().get_friendly_name()
-                else:
-                    RuntimeError('The statistics should be collected only from the input of output edges of the node')
-                output_name = f'Result_{stat_node_name}.{port_id}'
-                output_name_to_node_name[output_name] = output_name_to_node_name.get(output_name, []) + [node_name]
-        return output_name_to_node_name
+    def update(self, output, target):
+        raise NotImplementedError()
 
-    def _register_statistics(self, outputs: NNCFData, statistic_points: StatisticPointsContainer) -> None:
-        """
-        Registers 'outputs' tensors from inferred model and register them to the correspondence 'statistic_points'.
-        """
-        output_name_to_node_name = self._find_output_name_to_node_name_mapping(statistic_points)
-        for output_name, output_tensor in outputs.items():
-            if output_name in output_name_to_node_name:
-                for node_name in output_name_to_node_name[output_name]:
-                    for statistic_point in statistic_points[node_name]:
-                        statistic_point.register_tensor(output_tensor)
+    def reset(self):
+        self._avg_value = None
+
+
+# TODO(andrey-churkin): This class should be refactored. We will be able to do that when
+# we will have moved the POT code in the NNCF.
+class OVEngine(pot.IEEngine):
+    """
+    Implementation of the engine for the OpenVINO backend.
+    All docstring for the methods can be found
+    [here](https://docs.openvino.ai/latest/pot_compression_api_README.html#engine).
+    """
+
+    def __init__(self,
+                 config,
+                 calibration_dataset: Dataset,
+                 validation_dataset: Dataset,
+                 validation_fn: Optional[Callable[[TModel, Iterable[Any]], float]] = None):
+        metric = DummyMetric() if validation_fn is not None else None
+        super().__init__(config, validation_dataset, metric)
+        self._calibration_dataset = calibration_dataset  # TODO(andrey-churkin): Not used now.
+        self._validation_dataset = validation_dataset
+        self._validation_fn = validation_fn
+
+    @property
+    def data_loader(self):
+        return self._validation_dataset
+
+    def _process_dataset(self,
+                         stats_layout,
+                         sampler,
+                         print_progress=False,
+                         need_metrics_per_sample=False):
+        compiled_model = self._ie.compile_model(self._model, self._device)
+        infer_request = compiled_model.create_infer_request()
+
+        indices = getattr(sampler, '_subset_indices')
+        for input_data in self._validation_dataset.get_inference_data(indices):
+            outputs = infer_request.infer(self._fill_input(compiled_model, input_data))
+            self._process_infer_output(stats_layout, outputs, None, None, need_metrics_per_sample)
+
+    def _process_dataset_async(self,
+                               stats_layout,
+                               sampler,
+                               print_progress=False,
+                               need_metrics_per_sample=False,
+                               requests_num=0):
+        total_length = len(sampler)
+        indices = getattr(sampler, '_subset_indices')
+
+        def completion_callback(request, user_data):
+            start_time, batch_id = user_data
+            self._process_infer_output(stats_layout, request.results, None, None, need_metrics_per_sample)
+
+            # Print progress
+            if self._print_inference_progress(progress_log_fn, batch_id, total_length, start_time, time()):
+                start_time = time()
+
+        progress_log_fn = logger.info if print_progress else logger.debug
+        self._ie.set_property(self._device,
+                              {'CPU_THROUGHPUT_STREAMS': 'CPU_THROUGHPUT_AUTO', 'CPU_BIND_THREAD': 'YES'})
+        # Load model to the plugin
+        compiled_model = self._ie.compile_model(model=self._model, device_name=self._device)
+        optimal_requests_num = compiled_model.get_property('OPTIMAL_NUMBER_OF_INFER_REQUESTS')
+        requests_num = optimal_requests_num if requests_num == 0 else requests_num
+        logger.debug('Async mode requests number: %d', requests_num)
+        infer_queue = AsyncInferQueue(compiled_model, requests_num)
+
+        progress_log_fn('Start inference of %d images', total_length)
+
+        dataloader_iter = iter(enumerate(self._validation_dataset.get_inference_data(indices)))
+        # Start inference
+        start_time = time()
+        infer_queue.set_callback(completion_callback)
+        for batch_id, input_data in dataloader_iter:
+            user_data = (start_time, batch_id)
+            infer_queue.start_async(self._fill_input(compiled_model, input_data), user_data)
+        infer_queue.wait_all()
+        progress_log_fn('Inference finished')
+
+    def _process_infer_output(self,
+                              stats_layout,
+                              predictions,
+                              batch_annotations,
+                              batch_meta,
+                              need_metrics_per_sample):
+        if stats_layout:
+            self._collect_statistics(predictions, stats_layout)
+
+        processed_outputs = pot.engines.utils.process_raw_output(predictions)
+        outputs = {name: processed_outputs[name] for name in self._output_layers}
+        logits = self.postprocess_output(outputs, None)
+
+        if need_metrics_per_sample:
+            self._per_sample_metrics.append(
+                {
+                    'sample_id': len(self._per_sample_metrics),
+                    'metric_name': 'user_metric',
+                    'result': logits
+                }
+            )
+
+    def predict(self,
+                stats_layout=None,
+                sampler=None,
+                stat_aliases=None,
+                metric_per_sample=False,
+                print_progress=False):
+        if self._model is None:
+            raise Exception('Model was not set in Engine class')
+
+        if self._validation_fn is not None:
+            indices = None
+            if sampler:
+                indices = getattr(sampler, '_subset_indices')
+            self._metric.avg_value = self._validation_fn(self._model, self._validation_dataset.get_data(indices))
+
+        return super().predict(stats_layout, sampler, stat_aliases, metric_per_sample, print_progress)

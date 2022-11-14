@@ -17,7 +17,7 @@ from nncf.common.graph.transformations.commands import TransformationCommand
 from nncf.common.graph.transformations.commands import TransformationType
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.graph.transformations.commands import TargetPoint
-from nncf.openvino.algorithms.quantization.utils import FQParameters
+from nncf.experimental.openvino.algorithms.quantization.utils import FQParameters
 
 
 class OVTargetPoint(TargetPoint):

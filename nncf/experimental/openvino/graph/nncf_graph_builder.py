@@ -23,9 +23,9 @@ from nncf.common.graph.operator_metatypes import OutputNoopMetatype
 from nncf.common.graph.operator_metatypes import UnknownMetatype
 from nncf.common.utils.logger import logger as nncf_logger
 
-from nncf.openvino.graph.metatypes.ov_metatypes import OV_OPERATION_METATYPES
-from nncf.openvino.graph.metatypes.ov_metatypes import OVConstantMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVResultMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OV_OPERATION_METATYPES
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVConstantMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVResultMetatype
 
 
 class GraphConverter:

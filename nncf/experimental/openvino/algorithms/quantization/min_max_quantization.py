@@ -35,20 +35,20 @@ from nncf.experimental.post_training.algorithms.quantization.min_max_quantizatio
 from nncf.experimental.post_training.algorithms.algorithm import PostTrainingAlgorithms
 from nncf.experimental.post_training.statistics.statistic_point import StatisticPoint
 from nncf.experimental.post_training.statistics.statistic_point import StatisticPointsContainer
-from nncf.openvino.graph.transformations.commands import OVTargetPoint
-from nncf.openvino.graph.transformations.layout import OVTransformationLayout
-from nncf.openvino.graph.metatypes.ov_metatypes import GENERAL_WEIGHT_LAYER_METATYPES
-from nncf.openvino.graph.nncf_graph_builder import GraphConverter
-from nncf.openvino.algorithms.quantization.default_quantization import DEFAULT_OV_QUANT_TRAIT_TO_OP_DICT
-from nncf.openvino.graph.transformations.commands import OVQuantizerInsertionCommand
-from nncf.openvino.engine import OVEngine
-from nncf.openvino.statistics.collectors import OVMinMaxStatisticCollector
-from nncf.openvino.statistics.collectors import OVMeanMinMaxStatisticCollector
-from nncf.openvino.graph.model_transformer import OVModelTransformer
-from nncf.openvino.hardware.fused_patterns import OPENVINO_HW_FUSED_PATTERNS
-from nncf.openvino.algorithms.quantization.utils import calculate_activation_quantizer_parameters
-from nncf.openvino.algorithms.quantization.utils import calculate_weight_quantizer_parameters
-from nncf.openvino.hardware.config import OVHWConfig
+from nncf.experimental.openvino.graph.transformations.commands import OVTargetPoint
+from nncf.experimental.openvino.graph.transformations.layout import OVTransformationLayout
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import GENERAL_WEIGHT_LAYER_METATYPES
+from nncf.experimental.openvino.graph.nncf_graph_builder import GraphConverter
+from nncf.experimental.openvino.algorithms.quantization.default_quantization import DEFAULT_OV_QUANT_TRAIT_TO_OP_DICT
+from nncf.experimental.openvino.graph.transformations.commands import OVQuantizerInsertionCommand
+from nncf.experimental.openvino.engine import OVEngine
+from nncf.experimental.openvino.statistics.collectors import OVMinMaxStatisticCollector
+from nncf.experimental.openvino.statistics.collectors import OVMeanMinMaxStatisticCollector
+from nncf.experimental.openvino.graph.model_transformer import OVModelTransformer
+from nncf.experimental.openvino.hardware.fused_patterns import OPENVINO_HW_FUSED_PATTERNS
+from nncf.experimental.openvino.algorithms.quantization.utils import calculate_activation_quantizer_parameters
+from nncf.experimental.openvino.algorithms.quantization.utils import calculate_weight_quantizer_parameters
+from nncf.experimental.openvino.hardware.config import OVHWConfig
 from nncf.common.utils.backend import BackendType
 
 QUANTIZATION_LAYER_METATYPES = GENERAL_WEIGHT_LAYER_METATYPES

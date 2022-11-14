@@ -14,14 +14,14 @@
 from nncf.common.graph.patterns import GraphPattern
 from nncf.common.graph.patterns import HWFusedPatterns
 
-from nncf.openvino.hardware.pattern_operations import LINEAR_OPERATIONS
-from nncf.openvino.hardware.pattern_operations import BATCH_NORMALIZATION_OPERATIONS
-from nncf.openvino.hardware.pattern_operations import ATOMIC_ACTIVATIONS_OPERATIONS
-from nncf.openvino.hardware.pattern_operations import ARITHMETIC_OPERATIONS
-from nncf.openvino.hardware.pattern_operations import MATMUL_OPERATIONS
+from nncf.experimental.openvino.hardware.pattern_operations import LINEAR_OPERATIONS
+from nncf.experimental.openvino.hardware.pattern_operations import BATCH_NORMALIZATION_OPERATIONS
+from nncf.experimental.openvino.hardware.pattern_operations import ATOMIC_ACTIVATIONS_OPERATIONS
+from nncf.experimental.openvino.hardware.pattern_operations import ARITHMETIC_OPERATIONS
+from nncf.experimental.openvino.hardware.pattern_operations import MATMUL_OPERATIONS
 
-# from nncf.openvino.hardware.patterns import create_swish_activation
-# from nncf.openvino.hardware.patterns import create_input_preprocessing_pattern
+# from nncf.experimental.openvino.hardware.patterns import create_swish_activation
+# from nncf.experimental.openvino.hardware.patterns import create_input_preprocessing_pattern
 
 
 def _get_openvino_hw_fused_patterns() -> HWFusedPatterns:

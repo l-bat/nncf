@@ -16,7 +16,7 @@ from typing import Union
 from collections import defaultdict
 
 from nncf.common.utils.logger import logger as nncf_logger
-from nncf.openvino.statistics.collectors import OVNNCFCollectorTensorProcessor
+from nncf.experimental.openvino.statistics.collectors import OVNNCFCollectorTensorProcessor
 
 from nncf.experimental.post_training.api.dataset import Dataset, NNCFData
 

@@ -19,7 +19,7 @@ import numpy as np
 from nncf.common.quantization.structs import QuantizerConfig
 from nncf.common.quantization.structs import QuantizationMode
 
-from nncf.openvino.statistics.collectors import OVMinMaxTensorStatistic
+from nncf.experimental.openvino.statistics.collectors import OVMinMaxTensorStatistic
 
 
 class FQParameters:

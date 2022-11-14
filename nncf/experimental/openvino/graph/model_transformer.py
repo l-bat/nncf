@@ -17,9 +17,9 @@ import openvino.runtime as ov
 
 from nncf.common.graph.model_transformer import ModelTransformer
 from nncf.common.graph.transformations.commands import TargetType
-from nncf.openvino.graph.transformations.layout import OVTransformationLayout
-from nncf.openvino.graph.transformations.commands import OVQuantizerInsertionCommand
-from nncf.openvino.graph.transformations.commands import OVOutputInsertionCommand
+from nncf.experimental.openvino.graph.transformations.layout import OVTransformationLayout
+from nncf.experimental.openvino.graph.transformations.commands import OVQuantizerInsertionCommand
+from nncf.experimental.openvino.graph.transformations.commands import OVOutputInsertionCommand
 
 ModelType = TypeVar('ModelType')
 

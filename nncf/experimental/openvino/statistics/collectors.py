@@ -20,8 +20,8 @@ from nncf.common.tensor import TensorElementsType
 from nncf.common.tensor_statistics.collectors import MinMaxStatisticCollector
 from nncf.common.tensor_statistics.collectors import NNCFCollectorTensorProcessor
 from nncf.common.tensor_statistics.collectors import MeanMinMaxStatisticCollector
-from nncf.openvino.tensor import OVNNCFTensor
-from nncf.openvino.statistics.statistics import OVMinMaxTensorStatistic
+from nncf.experimental.openvino.tensor import OVNNCFTensor
+from nncf.experimental.openvino.statistics.statistics import OVMinMaxTensorStatistic
 
 
 class OVNNCFCollectorTensorProcessor(NNCFCollectorTensorProcessor):

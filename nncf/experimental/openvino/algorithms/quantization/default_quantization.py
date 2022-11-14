@@ -12,20 +12,20 @@
 """
 
 from nncf.common.quantization.quantizer_propagation.structs import QuantizationTrait
-from nncf.openvino.graph.metatypes.ov_metatypes import OVConvolutionMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVConvolutionBackpropDataMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVMatMulMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVSigmoidMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVHardSigmoidMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVAveragePoolMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVAddLayerMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVSubMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVMulLayerMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVConcatMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVBatchNormMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVInterpolateMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVSoftmaxMetatype
-from nncf.openvino.graph.metatypes.ov_metatypes import OVExpMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVConvolutionMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVConvolutionBackpropDataMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVMatMulMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSigmoidMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVHardSigmoidMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVAveragePoolMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVAddLayerMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSubMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVMulLayerMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVConcatMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVBatchNormMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVInterpolateMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSoftmaxMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVExpMetatype
 
 from nncf.common.graph.operator_metatypes import UnknownMetatype
 
