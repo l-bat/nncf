@@ -20,8 +20,10 @@ from nncf.common.tensor import TensorElementsType
 from nncf.common.tensor_statistics.collectors import MinMaxStatisticCollector
 from nncf.common.tensor_statistics.collectors import NNCFCollectorTensorProcessor
 from nncf.common.tensor_statistics.collectors import MeanMinMaxStatisticCollector
+from nncf.common.tensor_statistics.collectors import MeanStatisticCollector
 from nncf.experimental.openvino.tensor import OVNNCFTensor
 from nncf.experimental.openvino.statistics.statistics import OVMinMaxTensorStatistic
+from nncf.experimental.openvino.statistics.statistics import OVMeanTensorStatistic
 
 
 class OVNNCFCollectorTensorProcessor(NNCFCollectorTensorProcessor):
@@ -89,3 +91,15 @@ class OVMeanMinMaxStatisticCollector(MeanMinMaxStatisticCollector):
 
     def _get_statistics(self) -> OVMinMaxTensorStatistic:
         return OVMinMaxTensorStatistic(self._min_aggregate().tensor, self._max_aggregate().tensor)
+
+
+class OVMeanStatisticCollector(MeanStatisticCollector):
+    @staticmethod
+    def _get_processor() -> NNCFCollectorTensorProcessor:
+        return OVNNCFCollectorTensorProcessor()
+
+    def _register_input(self, x: OVNNCFTensor):
+        self._register_input_common(x)
+
+    def _get_statistics(self) -> OVMeanTensorStatistic:
+        return OVMeanTensorStatistic(self._mean_aggregate().tensor, self._shape())

@@ -160,6 +160,10 @@ class MinMaxQuantization(Algorithm):
             from nncf.experimental.post_training.algorithms.quantization.min_max.onnx_backend import \
                 ONNXMinMaxAlgoBackend
             self._backend_entity = ONNXMinMaxAlgoBackend()
+        elif model_backend == BackendType.OVNATIVE:
+            from nncf.experimental.post_training.algorithms.quantization.min_max.ov_backend import \
+                OVMinMaxAlgoBackend
+            self._backend_entity = OVMinMaxAlgoBackend()
         else:
             raise RuntimeError('Cannot return backend-specific entity'
                                'because {} is not supported!'.format(model_backend))

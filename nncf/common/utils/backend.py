@@ -20,6 +20,7 @@ class BackendType(Enum):
     TENSORFLOW = 'Tensorflow'
     ONNX = 'ONNX'
     OPENVINO = 'OpenVINO'
+    OVNATIVE = 'OpenVINONative'
 
 
 def get_backend(model) -> BackendType:
@@ -51,6 +52,7 @@ def get_backend(model) -> BackendType:
     try:
         import openvino.runtime as ov
         available_frameworks.append('OpenVINO')
+        available_frameworks.append('OpenVINONative')
     except ImportError:
         ov = None
 
@@ -64,7 +66,7 @@ def get_backend(model) -> BackendType:
         return BackendType.ONNX
 
     if ov is not None and isinstance(model, ov.Model):
-        return BackendType.OPENVINO
+        return BackendType.OVNATIVE
 
     raise RuntimeError('Could not infer the backend framework from the model type because '
                        'the framework is not available or the model type is unsupported. '

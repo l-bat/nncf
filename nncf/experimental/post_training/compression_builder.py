@@ -53,9 +53,9 @@ class CompressionBuilder:
         if backend == BackendType.ONNX:
             from nncf.experimental.onnx.engine import ONNXEngine
             return ONNXEngine()
-        elif backend == BackendType.OPENVINO:
-            from nncf.openvino.engine import OVEngine
-            return OVEngine()
+        elif backend == BackendType.OVNATIVE:
+            from nncf.experimental.openvino.engine import OVNativeEngine
+            return OVNativeEngine()
         return None
 
     def _create_statistics_aggregator(self,
@@ -75,8 +75,8 @@ class CompressionBuilder:
             from nncf.experimental.onnx.statistics.aggregator import \
                 ONNXStatisticsAggregator
             return ONNXStatisticsAggregator(engine, dataset)
-        elif backend == BackendType.OPENVINO:
-            from nncf.openvino.statistics.aggregator import \
+        elif backend == BackendType.OVNATIVE:
+            from nncf.experimental.openvino.statistics.aggregator import \
                 OVStatisticsAggregator  # pylint: disable=cyclic-import
             return OVStatisticsAggregator(engine, dataset)
         return None
@@ -93,8 +93,8 @@ class CompressionBuilder:
             from nncf.experimental.onnx.graph.model_transformer import \
                 ONNXModelTransformer
             return ONNXModelTransformer(model)
-        elif backend == BackendType.OPENVINO:
-            from nncf.openvino.graph.model_transformer import OVModelTransformer
+        elif backend == BackendType.OVNATIVE:
+            from nncf.experimental.openvino.graph.model_transformer import OVModelTransformer
             return OVModelTransformer(model)
         return None
 
@@ -102,7 +102,7 @@ class CompressionBuilder:
         if backend == BackendType.ONNX:
             from nncf.experimental.onnx.model_normalizer import ONNXModelNormalizer
             return ONNXModelNormalizer.normalize_model(model, self.convert_opset_version)
-        elif backend == BackendType.OPENVINO:
+        elif backend == BackendType.OVNATIVE:
             return model
 
         return None

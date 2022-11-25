@@ -27,7 +27,7 @@ from nncf.experimental.openvino.samplers import create_ov_sampler
 from nncf.experimental.openvino.tensor import OVNNCFTensor
 
 
-class OVEngine(Engine):
+class OVNativeEngine(Engine):
     """
     Engine for OpenVINO backend using OpenVINO runtime to infer the model.
     """
