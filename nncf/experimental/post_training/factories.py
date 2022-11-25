@@ -23,5 +23,8 @@ class NNCFGraphFactory:
             from nncf.experimental.onnx.graph.nncf_graph_builder import GraphConverter
 
             return GraphConverter.create_nncf_graph(model)
+        if model_backend == BackendType.OVNATIVE:
+            from nncf.experimental.openvino.graph.nncf_graph_builder import GraphConverter
+            return GraphConverter.create_nncf_graph(model)
         raise RuntimeError('Cannot create backend-specific graph'
                            'because {} is not supported!'.format(model_backend))

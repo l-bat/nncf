@@ -72,6 +72,10 @@ class OVMinMaxAlgoBackend(MinMaxAlgoBackend):
     def target_point(target_type: TargetType,
                      target_node_name: str = None,
                      port_id: int = None) -> OVTargetPoint:
+        if port_id is None:
+            if target_type == TargetType.PRE_LAYER_OPERATION:
+                raise RuntimeError('port_id must be specified for PRE_LAYER_OPERATION ')
+            port_id = 0 if target_type == TargetType.POST_LAYER_OPERATION else 1
         return OVTargetPoint(target_type, target_node_name, port_id)
 
     @staticmethod
@@ -103,11 +107,6 @@ class OVMinMaxAlgoBackend(MinMaxAlgoBackend):
             if node.get_friendly_name() == tensor_name and node.get_type() == 'Const':
                 return node.get_data()
         raise RuntimeError(f'There is no Constant node with the name {tensor_name}')
-
-    # @staticmethod
-    # def get_tensor_names(node: NNCFNode) -> Tuple[List[str], List[str]]:
-    #     return node.layer_attributes.input_tensor_names, \
-    #         node.layer_attributes.output_tensor_names
 
     @staticmethod
     def get_weight_config(config: QuantizerConfig, model: ov.Model) -> QuantizerConfig:

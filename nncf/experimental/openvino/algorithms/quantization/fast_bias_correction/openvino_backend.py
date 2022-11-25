@@ -84,10 +84,9 @@ class ONNXFBCAlgoBackend(FBCAlgoBackend):
     def nncf_tensor(tensor: np.ndarray) -> OVNNCFTensor:
         return OVNNCFTensor(tensor)
 
-    # @staticmethod
-    # def get_tensor_names(node: NNCFNode):
-    #     return node.layer_attributes.input_tensor_names, \
-    #         node.layer_attributes.output_tensor_names
+    @staticmethod
+    def get_tensor_names(node: NNCFNode):
+        raise NotImplementedError()
 
     @staticmethod
     def create_blob(shape: Tuple[int], data: List[float]) -> np.ndarray:

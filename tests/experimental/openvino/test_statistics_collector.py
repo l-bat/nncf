@@ -21,11 +21,11 @@ import numpy as np
 
 # print('ov', openvino.__path__)
 
-from nncf.experimental.openvino.engine import OVEngine
+from nncf.experimental.openvino.engine import OVNativeEngine
 from nncf.experimental.openvino.statistics.collectors import OVMinMaxStatisticCollector
 from nncf.experimental.openvino.statistics.aggregator import OVStatisticsAggregator
 from nncf.experimental.openvino.graph.model_transformer import OVModelTransformer
-from nncf.experimental.openvino.graph.transformations.layout import OVTransformationLayout
+from nncf.common.graph.transformations.layout import TransformationLayout
 from nncf.experimental.openvino.graph.transformations.commands import OVTargetPoint
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.experimental.openvino.graph.transformations.commands import OVOutputInsertionCommand
@@ -37,9 +37,9 @@ from nncf.experimental.post_training.statistics.statistic_point import Statistic
 from nncf.experimental.post_training.statistics.statistic_point import StatisticPointsContainer
 from nncf.experimental.openvino.algorithms.quantization.utils import calculate_activation_quantizer_parameters
 from nncf.experimental.post_training.compression_builder import CompressionBuilder
-from nncf.experimental.openvino.algorithms.quantization.min_max_quantization import OpenVINOMinMaxQuantization
+from nncf.experimental.post_training.algorithms.quantization.min_max.algorithm import MinMaxQuantization
 from nncf.experimental.post_training.algorithms.quantization import MinMaxQuantizationParameters
-from nncf.experimental.post_training.algorithms.quantization.min_max_quantization import RangeType
+from nncf.experimental.post_training.algorithms.quantization.min_max.algorithm import RangeType
 
 # from tests.experimental.openvino.models import OVLinearModel
 # from tests.experimental.openvino.models import OVMultiInputOutputModel
@@ -84,7 +84,7 @@ def test_infer_original_model(model):
     input_data = {inp.get_friendly_name(): OVNNCFTensor(np.zeros(inp.shape, dtype=np.float32))
                   for inp in model.get_parameters()}
 
-    engine = OVEngine()
+    engine = OVNativeEngine()
     engine.set_model(model)
     outputs = engine.infer(input_data)
     for out_name, out in outputs.items():
@@ -92,7 +92,7 @@ def test_infer_original_model(model):
 
 
 def create_transformed_model(model, target_layers, target_type):
-    transformation_layout = OVTransformationLayout()
+    transformation_layout = TransformationLayout()
     for target_layer in target_layers:
         target_point = OVTargetPoint(target_type, target_layer, port_id=0)
         command = OVOutputInsertionCommand(target_point)
@@ -135,10 +135,11 @@ def test_output_insertion_post_layer(target_layers, target_layer_outputs):
     for out_name in extra_outputs:
         assert out_name in target_layer_outputs
 
+
 def create_quantized_model(model, statistics_aggregator, target_points):
     tensor_collector = OVMinMaxStatisticCollector(use_abs_max=True, reduction_shape=None, num_samples=3)
     statistic_points = StatisticPointsContainer()
-    transformation_layout = OVTransformationLayout()
+    transformation_layout = TransformationLayout()
 
     for target_point in target_points:
         stat_point = StatisticPoint(target_point=target_point,
@@ -146,7 +147,8 @@ def create_quantized_model(model, statistics_aggregator, target_points):
                                     algorithm=PostTrainingAlgorithms.MinMaxQuantization)
         statistic_points.add_statistic_point(stat_point)
     statistics_aggregator.register_stastistic_points(statistic_points)
-    statistics_aggregator.collect_statistics(model)
+    model_transformer = OVModelTransformer(model)
+    statistics_aggregator.collect_statistics(model_transformer)
 
     for algo_stat_points in statistic_points.values():
         for statistic_point in algo_stat_points:
@@ -155,7 +157,6 @@ def create_quantized_model(model, statistics_aggregator, target_points):
                 transformation_commands = OVQuantizerInsertionCommand(statistic_point.target_point, parameters)
                 transformation_layout.register(transformation_commands)
 
-    model_transformer = OVModelTransformer(model)
     quantized_model = model_transformer.transform(transformation_layout)
     return quantized_model
 
@@ -164,7 +165,7 @@ def create_quantized_model(model, statistics_aggregator, target_points):
 def test_fq_insertion_pre_layer(target_layers):
     model = OVMultiResultModel()
 
-    engine = OVEngine()
+    engine = OVNativeEngine()
     dataset = TestDataset(DATASET_SAMPLES)
     statistics_aggregator = OVStatisticsAggregator(engine, dataset)
 
@@ -184,7 +185,7 @@ def test_fq_insertion_pre_layer(target_layers):
 def test_fq_insertion_post_layer(target_layers):
     model = OVMultiResultModel()
 
-    engine = OVEngine()
+    engine = OVNativeEngine()
     dataset = TestDataset(DATASET_SAMPLES)
     statistics_aggregator = OVStatisticsAggregator(engine, dataset)
 
@@ -198,7 +199,7 @@ def test_fq_insertion_post_layer(target_layers):
         if op.get_friendly_name() in target_layers:
             out_nodes = op.output(port_id).get_target_inputs()
             for out_node in out_nodes:
-                assert out_node.get_type_name() == 'FakeQuantize'
+                assert out_node.get_node().get_type_name() == 'FakeQuantize'
 
 
 
@@ -236,14 +237,14 @@ def test_statistics_aggregator(range_type, test_parameters):
     import openvino.runtime as ov
     model = OVMultiResultModel().ov_model
     # model = OVMatMulActModel().ov_model
-    for node in model.get_ordered_ops():
-        print('node.name', node.get_friendly_name())
+    # for node in model.get_ordered_ops():
+    #     print('node.name', node.get_friendly_name())
 
 
     dataset = TestDataset(DATASET_SAMPLES)
     compression_builder = CompressionBuilder()
 
-    quantization = OpenVINOMinMaxQuantization(MinMaxQuantizationParameters(
+    quantization = MinMaxQuantization(MinMaxQuantizationParameters(
         number_samples=test_parameters.number_samples,
         range_type=range_type
     ))
@@ -253,7 +254,7 @@ def test_statistics_aggregator(range_type, test_parameters):
     for node in quantized_model.get_ordered_ops():
         print('node.name', node.get_friendly_name(), [out.get_node() for out in node.input_values()])
 
-    ov.serialize(quantized_model, 'quantized_model.xml', 'quantized_model.bin')
+    # ov.serialize(quantized_model, 'quantized_model.xml', 'quantized_model.bin')
 
     num_q = 0
     for node in quantized_model.get_ops():
@@ -290,7 +291,7 @@ def test_statistics_aggregator(range_type, test_parameters):
 # @pytest.mark.parametrize('target_layers, target_layer_outputs', zip(TARGET_LAYERS, TARGET_LAYERS_OUTPUT))
 # def test_compute_statistics(target_layers, target_layer_outputs):
 #     model = OVMultiResultModel()
-#     engine = OVEngine()
+#     engine = OVNativeEngine()
 #     dataset = TestDataset(DATASET_SAMPLES)
 
 #     statistic_points = StatisticPointsContainer()
@@ -333,7 +334,7 @@ def test_statistics_aggregator(range_type, test_parameters):
     # tensor_collector = OVMinMaxStatisticCollector(use_abs_max=True, reduction_shape=None, num_samples=2)
     # statistic_points.add_statistic_point(StatisticPoint(target_point=target_point, tensor_collector=tensor_collector, algorithm=PostTrainingAlgorithms.MinMaxQuantization))
 
-    # engine = OVEngine()
+    # engine = OVNativeEngine()
     # dataset = TestDataset(DATASET_SAMPLES)
     # statistics_aggregator = OVStatisticsAggregator(engine, dataset)
     # statistics_aggregator.register_stastistic_points(statistic_points)
@@ -356,7 +357,7 @@ def test_statistics_aggregator(range_type, test_parameters):
 #                                                 num_samples=10)
 
 
-#     engine = OVEngine()
+#     engine = OVNativeEngine()
 #     dataset = create_imagenet_torch_dataset(
 #         dataset_path, input_name=input_name,
 #         input_shape=input_shape, batch_size=batch_size, shuffle=shuffle)

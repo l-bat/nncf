@@ -33,7 +33,7 @@ from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVHardSigmoi
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVAddLayerMetatype
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVMulLayerMetatype
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVDivLayerMetatype
-from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSubMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSubLayerMetatype
 
 LINEAR_OPERATIONS = {GraphPattern.METATYPE_ATTR: [OVConvolutionMetatype,
                                                   OVConvolutionBackpropDataMetatype,
@@ -59,7 +59,7 @@ ATOMIC_ACTIVATIONS_OPERATIONS = merge_two_types_of_operations(RELU_OPERATIONS,
                                                               'ATOMIC_ACTIVATIONS')
 
 ARITHMETIC_OPERATIONS = {GraphPattern.METATYPE_ATTR: [OVAddLayerMetatype,
-                                                      OVSubMetatype,
+                                                      OVSubLayerMetatype,
                                                       OVMulLayerMetatype,
                                                       OVDivLayerMetatype,
                                                       ],

@@ -220,7 +220,7 @@ class OVAddLayerMetatype(OVOpMetatype):
 
 
 @OV_OPERATION_METATYPES.register()
-class OVSubMetatype(OVOpMetatype):
+class OVSubLayerMetatype(OVOpMetatype):
     name = 'SubOp'
     op_names = ['Subtract']
     hw_config_names = [HWConfigOpName.SUBTRACT]

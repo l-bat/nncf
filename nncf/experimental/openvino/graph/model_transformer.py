@@ -17,7 +17,7 @@ import openvino.runtime as ov
 
 from nncf.common.graph.model_transformer import ModelTransformer
 from nncf.common.graph.transformations.commands import TargetType
-from nncf.experimental.openvino.graph.transformations.layout import OVTransformationLayout
+from nncf.common.graph.transformations.layout import TransformationLayout
 from nncf.experimental.openvino.graph.transformations.commands import OVQuantizerInsertionCommand
 from nncf.experimental.openvino.graph.transformations.commands import OVOutputInsertionCommand
 
@@ -34,7 +34,7 @@ class OVModelTransformer(ModelTransformer):
         self.output_insertion_commands = []  # type: List[OVOutputInsertionCommand]
         self.name_to_node_mapping = {op.get_friendly_name(): op for op in self.transformed_model.get_ops()}
 
-    def transform(self, transformation_layout: OVTransformationLayout) -> ov.Model:
+    def transform(self, transformation_layout: TransformationLayout) -> ov.Model:
         for transformation in transformation_layout.transformations:
             if isinstance(transformation, OVQuantizerInsertionCommand):
                 self._add_quantizer_insertion_transformation(transformation)
@@ -64,6 +64,9 @@ class OVModelTransformer(ModelTransformer):
             node = self.name_to_node_mapping[node_name]
             port_id = transformation.target_point.port_id
             if transformation.target_point.type == TargetType.POST_LAYER_OPERATION:
+                print('node', node, type(node), port_id)
+                # get_output_descriptor(port_id)
+                # get_output_size
                 output = node.output(port_id)
             elif transformation.target_point.type == TargetType.PRE_LAYER_OPERATION:
                 output = node.input_value(port_id)

@@ -15,6 +15,7 @@ from copy import deepcopy
 from typing import Dict
 from typing import List
 from typing import Tuple
+from typing import Union
 import numpy as np
 import onnx
 
@@ -24,6 +25,7 @@ from nncf.common.graph.patterns import HWFusedPatterns
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.hardware.config import HWConfig
 from nncf.common.quantization.structs import QuantizerConfig
+from nncf.common.quantization.structs import QuantizationMode
 from nncf.common.tensor_statistics.collectors import ReductionShape
 from nncf.common.utils.backend import BackendType
 from nncf.common.utils.logger import logger as nncf_logger
@@ -75,13 +77,108 @@ class ONNXMinMaxAlgoBackend(MinMaxAlgoBackend):
     @staticmethod
     def target_point(target_type: TargetType,
                      target_node_name: str = None,
-                     edge_name: str = None) -> ONNXTargetPoint:
+                     port_id: int = None) -> ONNXTargetPoint:
+        if target_type == TargetType.PRE_LAYER_OPERATION and port_id is None:
+            raise RuntimeError('port_id must be specified for target_point with PRE_LAYER_OPERATION type')
+
+        if target_type == TargetType.POST_LAYER_OPERATION:
+            port_id = 0
+        elif target_type == TargetType.OPERATION_WITH_WEIGHTS:
+            port_id = 1
+
+        input_tensor_names, _ = ONNXMinMaxAlgoBackend.get_tensor_names(node)
+        edge_name = input_tensor_names[port_id]
         return ONNXTargetPoint(target_type, target_node_name, edge_name)
 
     @staticmethod
     def quantizer_insertion_command(target_point: ONNXTargetPoint,
-                                    parameters: QuantizerLayerParameters) -> ONNXQuantizerInsertionCommand:
+                                    quantizer_config: QuantizerConfig,
+                                    statistics: Union[MinMaxTensorStatistic, np.ndarray],
+                                    ) -> ONNXQuantizerInsertionCommand:
+        parameters = calculate_quantizer_parameters(statistics, quantizer_config)
         return ONNXQuantizerInsertionCommand(target_point, parameters)
+
+
+class ONNXQuantizerLayerParameters:
+    """
+    Class handles Quantizer/Dequantizer layer attributes.
+    """
+
+    def __init__(self, scale: List[float], zero_point: List[int], mode: QuantizationMode):
+        self.scale = scale
+        self.zero_point = zero_point
+        self.mode = mode
+
+    @staticmethod
+    def calculate_scale_zp(input_low: List[float],
+                           input_high: List[float],
+                           num_bits: int,
+                           mode: QuantizationMode) -> Union[float, np.ndarray]:
+        """
+        Calculates Quantizer/Dequantizer layer scale level.
+        """
+        if mode == QuantizationMode.SYMMETRIC:
+            input_abs_max = np.maximum(np.abs(input_high), np.abs(input_low))
+            scales = input_abs_max / ((2 ** num_bits - 1) / 2)
+            zero_point = np.zeros_like(scales, dtype=np.int64)
+        else:
+            scales = (input_high - input_low) / 2 ** num_bits
+            zero_point = -input_low / scales
+        return scales, zero_point
+
+
+    # def calculate_weight_quantizer_parameters(weight_tensor: np.ndarray, quantizer_config: QuantizerConfig) -> \
+    #         ONNXQuantizerLayerParameters:
+    #     """
+    #     Calculates layer attributes for weight quantizer.
+    #     """
+    #     num_bits = quantizer_config.num_bits
+    #     mode = quantizer_config.mode
+
+    #     per_channel = quantizer_config.per_channel
+    #     if per_channel:
+    #         axes = tuple(range(len(weight_tensor.shape))[1:])
+    #     else:
+    #         axes = None
+
+    #     input_high = np.amax(weight_tensor, axis=axes)
+    #     input_low = np.amin(weight_tensor, axis=axes)
+    #     scale, zero_point = calculate_scale_zp(input_low,  input_high, num_bits, mode)
+    #     return ONNXQuantizerLayerParameters(scale.tolist(), zero_point.tolist(), mode)
+
+    # def calculate_activation_quantizer_parameters(statistics: MinMaxTensorStatistic,
+    #                                             quantizer_config: QuantizerConfig) -> ONNXQuantizerLayerParameters:
+    #     """
+    #     Calculates layer attributes for activation quantizer.
+    #     """
+    #     num_bits = quantizer_config.num_bits
+    #     mode = quantizer_config.mode
+    #     input_low = statistics.min_values
+    #     input_high = statistics.max_values
+    #     scale, zero_point = calculate_scale_level(input_low,  input_high, num_bits, mode)
+    #     return ONNXQuantizerLayerParameters(scale.tolist(), zero_point.tolist(), mode)
+
+    @staticmethod
+    def calculate_quantizer_parameters(statistics: Union[MinMaxTensorStatistic, np.ndarray],
+                                       quantizer_config: QuantizerConfig) -> ONNXQuantizerLayerParameters:
+        """
+        Calculates layer attributes for quantizer.
+        """
+        num_bits = quantizer_config.num_bits
+        mode = quantizer_config.mode
+
+        if isinstance(statistics, MinMaxTensorStatistic):
+            input_low = statistics.min_values
+            input_high = statistics.max_values
+        else:
+            per_channel = quantizer_config.per_channel
+            axes = tuple(range(len(statistics.shape))[1:]) if per_channel else None
+            input_high = np.amax(statistics, axis=axes)
+            input_low = np.amin(statistics, axis=axes)
+
+        scale, zero_point = calculate_scale_zp(input_low, input_high, num_bits, mode)
+        return ONNXQuantizerLayerParameters(scale.tolist(), zero_point.tolist(), mode)
+
 
     @staticmethod
     def minmax_statistic_collector(use_abs_max: bool,
@@ -102,7 +199,8 @@ class ONNXMinMaxAlgoBackend(MinMaxAlgoBackend):
                                                 window_size)
 
     @staticmethod
-    def get_initializer_value(model: onnx.ModelProto, initializer_name: str) -> np.ndarray:
+    def get_weight_tensor(model: onnx.ModelProto, port_id: int) -> np.ndarray:
+        initializer_name = 
         for initializer in model.graph.initializer:
             if initializer.name == initializer_name:
                 return onnx.numpy_helper.to_array(initializer)

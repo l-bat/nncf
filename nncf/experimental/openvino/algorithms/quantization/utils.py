@@ -78,7 +78,8 @@ def calculate_activation_quantizer_parameters(statistics: OVMinMaxTensorStatisti
     """
     input_low = np.array(statistics.min_values)
     input_high = np.array(statistics.max_values)
-    return calculate_fq_parameters(num_bits, input_low, input_high, input_low < 0)
+    mode = quantizer_config.mode
+    return calculate_fq_parameters(num_bits, input_low, input_high, mode == QuantizationMode.SYMMETRIC)
 
 
 def find_ignored_scopes(disallowed_op_types: List[str], model: ov.Model) -> List[str]:

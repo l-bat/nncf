@@ -19,7 +19,7 @@ from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSigmoidMet
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVHardSigmoidMetatype
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVAveragePoolMetatype
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVAddLayerMetatype
-from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSubMetatype
+from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVSubLayerMetatype
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVMulLayerMetatype
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVConcatMetatype
 from nncf.experimental.openvino.graph.metatypes.ov_metatypes import OVBatchNormMetatype
@@ -36,7 +36,7 @@ DEFAULT_OV_QUANT_TRAIT_TO_OP_DICT = {
         OVMatMulMetatype,
         OVAveragePoolMetatype,
         OVAddLayerMetatype,
-        OVSubMetatype,
+        OVSubLayerMetatype,
         OVMulLayerMetatype,
         OVBatchNormMetatype,
         OVHardSigmoidMetatype,

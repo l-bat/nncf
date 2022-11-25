@@ -86,13 +86,13 @@ class MinMaxAlgoBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def target_point(target_type: TargetType, target_node_name: str, edge_name: str = None) -> TargetPoint:
+    def target_point(target_type: TargetType, target_node_name: str, port_id: int = None) -> TargetPoint:
         """
         Returns backend-specific target point.
 
         :param target_type: Type of the location that should be modified.
         :param target_node_name: Name of the located node.
-        :param edge_name: Name of the tensor for the statistics disctribution.
+        :param port_id: Zero-based port number of the operation that this target point corresponds to.
         :return: Backend-specific TargetPoint.
         """
 
@@ -148,16 +148,6 @@ class MinMaxAlgoBackend(ABC):
         :param model: Backend-specific model for the initializer finding.
         :param initializer_name: Name of the tensor/initializer to find in the model.
         :return: Initializer value in the NumPy format.
-        """
-
-    @staticmethod
-    @abstractmethod
-    def get_tensor_names(node: NNCFNode) -> Tuple[List[str], List[str]]:
-        """
-        Returns tuple of the lists with the input & output tensor names respectively.
-
-        :param node: NNCFNode with the layer_attributes.
-        :return: Tuple of the lists with the names.
         """
 
     @staticmethod
