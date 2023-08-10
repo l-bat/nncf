@@ -617,6 +617,8 @@ CONSTANT_WEIGHT_LAYER_METATYPES = [
     ONNXEmbeddingMetatype,
 ]
 
+EXTENDED_WEIGHT_LAYER_METATYPES = CONSTANT_WEIGHT_LAYER_METATYPES + [ONNXEmbeddingMetatype]
+
 MATMUL_METATYPES = [ONNXGemmMetatype, ONNXMatMulMetatype]
 
 GENERAL_WEIGHT_LAYER_METATYPES = CONSTANT_WEIGHT_LAYER_METATYPES + MATMUL_METATYPES
@@ -660,7 +662,7 @@ def get_constant_weight_port_ids(metatype: ONNXOpMetatype) -> List[int]:
     :param metatype: Metatype.
     :return: Port ids.
     """
-    if metatype in CONSTANT_WEIGHT_LAYER_METATYPES:
+    if metatype in EXTENDED_WEIGHT_LAYER_METATYPES:
         return metatype.weight_port_ids
     return []
 
