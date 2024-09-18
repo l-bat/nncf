@@ -91,12 +91,12 @@ class LMWeightCompression(BaseTestPipeline):
             if not (self.fp32_model_dir / self.OV_MODEL_NAME).exists():
                 # export by model_id
                 self.model_hf = OVModelForCausalLM.from_pretrained(
-                    self.model_id, export=True, load_in_8bit=False, compile=False, stateful=is_stateful
+                    self.model_id, export=True, load_in_8bit=False, compile=False, stateful=is_stateful, cache_dir='CVS-152627',
                 )
             else:
                 # no export, load from IR. Applicable for sequential run of test cases in local environment.
                 self.model_hf = OVModelForCausalLM.from_pretrained(
-                    self.fp32_model_dir, trust_remote_code=True, load_in_8bit=False, compile=False, stateful=is_stateful
+                    self.fp32_model_dir, trust_remote_code=True, load_in_8bit=False, compile=False, stateful=is_stateful, cache_dir='CVS-152627',
                 )
             self.model = self.model_hf.model
         else:
@@ -107,7 +107,7 @@ class LMWeightCompression(BaseTestPipeline):
             self._dump_model_fp32()
 
     def prepare_preprocessor(self) -> None:
-        self.preprocessor = AutoTokenizer.from_pretrained(self.model_id)
+        self.preprocessor = AutoTokenizer.from_pretrained(self.model_id, cache_dir='CVS-152627')
 
     def get_transform_calibration_fn(self):
         def transform_fn(data, max_tokens=128):
@@ -158,7 +158,7 @@ class LMWeightCompression(BaseTestPipeline):
         return transform_fn
 
     def prepare_calibration_dataset(self):
-        dataset = load_dataset("wikitext", "wikitext-2-v1", split="train", revision="b08601e")
+        dataset = load_dataset("wikitext", "wikitext-2-v1", split="train", revision="b08601e", cache_dir='CVS-152627')
         dataset = dataset.filter(lambda example: len(example["text"]) > 128)
 
         self.calibration_dataset = nncf.Dataset(dataset, self.get_transform_calibration_fn())
@@ -268,7 +268,7 @@ class LMWeightCompression(BaseTestPipeline):
         compressed_model_hf = self.model_hf
         if self.backend != BackendType.FP32:
             compressed_model_hf = OVModelForCausalLM.from_pretrained(
-                self.output_model_dir, trust_remote_code=True, load_in_8bit=False, compile=False, stateful=is_stateful
+                self.output_model_dir, trust_remote_code=True, load_in_8bit=False, compile=False, stateful=is_stateful, cache_dir='CVS-152627',
             )
         print("Evaluation of the target model")
         _, all_metrics = evaluator.score(compressed_model_hf)
