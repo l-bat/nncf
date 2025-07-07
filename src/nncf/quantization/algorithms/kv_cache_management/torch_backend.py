@@ -1,0 +1,296 @@
+# Copyright (c) 2025 Intel Corporation
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#      http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from contextlib import contextmanager
+from typing import Generator
+
+import torch
+from torch import nn
+from transformers import PreTrainedModel
+
+from nncf import nncf_logger
+from nncf.quantization.advanced_parameters import KVCacheCompressionMode
+from nncf.quantization.advanced_parameters import KVCacheCompressionParameters
+
+
+class KVCacheCompressor:
+    def __init__(self, eviction_parameters: KVCacheCompressionParameters = KVCacheCompressionParameters()):
+        self.algorithm = eviction_parameters.algorithm
+        self.window_size = eviction_parameters.window_size
+        if self.algorithm == KVCacheCompressionMode.SNAPKV and self.window_size is None:
+            self.window_size = 8  # Default value for SNAPKV if not specified
+
+        self.start_size = eviction_parameters.start_size
+        self.recent_size = eviction_parameters.recent_size
+        self.intermediate_size = eviction_parameters.intermediate_size
+        self.score_aggregation = eviction_parameters.score_aggregation
+        self.strategy = eviction_parameters.strategy
+        self.group_size = eviction_parameters.group_size if self.strategy == "per_group" else 1
+        self._validate_arguments()
+
+        self._scores = []
+        self._cache_counter = None if self.score_aggregation == "sum" else []
+
+    def _validate_arguments(self):
+        """
+        Validates the arguments for the KV Cache compressor.
+        Raises a ValueError at the end if any condition fails.
+        """
+        error_msg = None
+        if self.start_size <= 0 or self.recent_size <= 0 or self.intermediate_size <= 0:
+            error_msg = "KV cache sizes must be positive integers."
+        elif any(size % self.group_size != 0 for size in (self.start_size, self.recent_size, self.intermediate_size)):
+            error_msg = "KV cache part sizes must be divisible by the group size."
+        elif self.score_aggregation not in {"sum", "norm_sum"}:
+            error_msg = "score_aggregation must be either 'sum' or 'norm_sum'."
+        elif self.window_size is not None and self.algorithm != KVCacheCompressionMode.SNAPKV:
+            error_msg = "Window size is only supported for SNAPKV algorithm."
+        elif self.window_size is not None and self.window_size <= 0:
+            error_msg = "Window size must be a positive integer if specified."
+        elif self.strategy not in {"per_token"}:
+            error_msg = f"Strategy {self.strategy} is not supported. Supported strategies: 'per_token'."
+
+        if error_msg:
+            raise ValueError(error_msg)
+
+    @property
+    def max_cache_size(self) -> int:
+        """
+        Returns the maximum size of the KV cache.
+        """
+        return self.start_size + self.recent_size + self.intermediate_size
+
+    def clean(self):
+        """
+        Resets the scores and cache counter.
+        """
+        self._scores = []
+        self._cache_counter = None if self.score_aggregation == "sum" else []
+
+    def _update_scores(self, layer_idx, attn_w):
+        """
+        Updates the scores based on the attention weights.
+        """
+        is_norm_sum = self.score_aggregation == "norm_sum"
+        layer_scores = self._scores[layer_idx] if len(self._scores) > layer_idx else None
+        layer_counter = self._cache_counter[layer_idx] if is_norm_sum and len(self._cache_counter) > layer_idx else None
+
+        if self.window_size is not None:
+            hh_score = attn_w[..., -self.window_size :, :].sum(0).sum(1)  # sum over batch and query length
+            if layer_scores is None:
+                hh_score = torch.max_pool1d(hh_score, kernel_size=7, padding=7 // 2, stride=1)
+        else:
+            hh_score = attn_w.sum(0).sum(1)
+
+        # num_attn_heads = hh_score.shape[0]
+        # if num_attn_heads != 1:
+        hh_score = hh_score.sum(0, keepdim=True)  # Sum over all heads, shape: (1, seq_len)
+
+        # Skip frozen start tokens in cache
+        # TODO: What if prompt size is smaller than start_size? - Remove slicing
+        hh_score = hh_score[:, self.start_size :]
+
+        if layer_scores is None:
+            layer_scores = hh_score
+            if is_norm_sum:
+                seq_len = layer_scores.shape[-1]  # seq_len without start_size
+                if self.window_size is not None:
+                    if seq_len > self.window_size:
+                        full_window = torch.full(
+                            (seq_len - self.window_size,),
+                            self.window_size,
+                            dtype=layer_scores.dtype,
+                            device=layer_scores.device,
+                        )
+                        tail = torch.arange(
+                            self.window_size, 0, -1, dtype=layer_scores.dtype, device=layer_scores.device
+                        )
+                        layer_counter = torch.cat((full_window, tail), dim=0)
+                    else:
+                        layer_counter = torch.arange(
+                            seq_len, 0, -1, dtype=layer_scores.dtype, device=layer_scores.device
+                        )
+                else:
+                    layer_counter = torch.arange(seq_len, 0, -1, dtype=layer_scores.dtype, device=layer_scores.device)
+        else:
+            num_new_tokens = hh_score.shape[-1] - layer_scores.shape[-1]
+            hh_score[:, :-num_new_tokens] += layer_scores
+            layer_scores = hh_score
+
+            if is_norm_sum:
+                if self.window_size is not None:
+                    w_size = min(self.window_size, num_new_tokens)
+                    new_tail = torch.arange(w_size, 0, -1, dtype=layer_scores.dtype, device=layer_scores.device)
+                    layer_counter += w_size
+                    layer_counter = torch.cat((layer_counter, new_tail), dim=-1)
+                else:
+                    layer_counter += num_new_tokens
+                    new_counters = torch.arange(
+                        num_new_tokens, 0, -1, dtype=layer_scores.dtype, device=layer_scores.device
+                    )
+                    layer_counter = torch.cat((layer_counter, new_counters), dim=-1)
+
+        if len(self._scores) <= layer_idx:
+            self._scores.append(layer_scores)
+            if is_norm_sum:
+                self._cache_counter.append(layer_counter)
+        else:
+            self._scores[layer_idx] = layer_scores
+            if is_norm_sum:
+                self._cache_counter[layer_idx] = layer_counter
+
+    def get_scores(self, layer_idx):
+        if self.score_aggregation == "sum":
+            return self._scores[layer_idx]
+        else:
+            return self._scores[layer_idx] / self._cache_counter[layer_idx]
+
+    def get_remaining_indices(self, scores: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the indices of the keep tokens in the KV cache after compression.
+
+        Parameters
+        ----------
+        scores : torch.Tensor
+            Scores of the tokens in the intermediate and recent parts of KV cache
+        Returns:
+            torch.Tensor: Indices of the remaining tokens in the KV cache
+        """
+        if self.strategy == "per_token":
+            keep_past = torch.arange(0, self.start_size, device=scores.device).unsqueeze(0)
+
+            _, keep_topk = torch.topk(scores[:, : -self.recent_size], self.intermediate_size, dim=-1)
+            keep_topk = keep_topk.sort().values + self.start_size
+            seq_len = self.start_size + scores.shape[-1]
+            keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=scores.device).unsqueeze(0)
+            remaining_idx = torch.cat([keep_past, keep_topk, keep_recent], dim=-1)
+
+        return remaining_idx
+
+    def compress(
+        self,
+        layer_idx: int,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        kwargs: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        The core logic of the compression method.
+
+        Parameters
+        ----------
+        module :
+            Transformer layer, see `hook` method for more details
+        hidden_states :
+            Hidden states of the layer
+        keys :
+            Keys of the cache
+        values :
+            Values of the cache
+        attentions :
+            Attention weights of the layer
+        kwargs :
+            Keyword arguments, as given to the forward pass of the layer
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Updated keys and values
+        """
+        # Compute scores
+        scores = self.get_scores(layer_idx)
+        assert scores.shape[-1] > self.recent_size
+        indices = self.get_remaining_indices(scores)
+
+        # Prune keys and values
+        mask = torch.zeros((indices.shape[0], keys.shape[-2]), dtype=torch.bool).to(keys.device)
+        mask = mask.scatter(-1, indices, 1)
+        mask = mask.unsqueeze(0).unsqueeze(-1)  # Add batch and head_dim dimensions
+
+        keys = keys.masked_select(mask).view(keys.shape[0], keys.shape[1], -1, keys.shape[-1])
+        values = values.masked_select(mask).view(values.shape[0], values.shape[1], -1, values.shape[-1])
+
+        score_mask = mask[0, :, self.start_size :, 0]
+        self._scores[layer_idx] = (
+            self._scores[layer_idx].masked_select(score_mask).view(self._scores[layer_idx].shape[0], -1)
+        )
+        if self.score_aggregation == "norm_sum":
+            self._cache_counter[layer_idx] = self._cache_counter[layer_idx].masked_select(score_mask[0])
+
+        return keys, values
+
+    def forward_hook(self, module: nn.Module, input: list[torch.Tensor], kwargs: dict, output: list):
+        """
+        Default forward hook called after the forward pass of an attention layer.
+        The hook calls the compress method to compress the KV cache.
+
+        Parameters
+        ----------
+        module :
+            Transformer attention layer.
+        input :
+            Input to the hook. This is the input to the forward pass of the layer.
+        kwargs :
+            Keyword arguments, as given to the forward pass of the layer.
+        output :
+            Output of the hook. This is the original output of the forward pass of the layer.
+
+        Returns
+        -------
+            Modified output of the forward pass of the layer.
+        """
+        cache = kwargs["past_key_value"]
+        keys = cache.key_cache[module.layer_idx]
+        values = cache.value_cache[module.layer_idx]
+        # print("Layer index:", module.layer_idx)
+
+        attn_weights = output[1]
+        # TODO: Support chunked prefill (prev_attn_weights.shape[-2] == 1 and current_attn_weights.shape[-2] != 1)
+        if module.layer_idx == 0 and attn_weights.shape[-2] != 1:
+            self.clean()
+
+        self._update_scores(module.layer_idx, attn_weights)
+
+        seq_len = keys.shape[-2]
+        if module.layer_idx == 0:
+            print(f"Current sequence length: {seq_len}, max cache size: {self.max_cache_size}")
+        if seq_len > self.max_cache_size:
+            if module.layer_idx == 0:
+                print("Before compression:", keys.shape)
+            keys, values = self.compress(module.layer_idx, keys, values, kwargs)
+            if module.layer_idx == 0:
+                print("After compression:", keys.shape)
+
+        cache.key_cache[module.layer_idx] = keys
+        cache.value_cache[module.layer_idx] = values
+        return output
+
+    @contextmanager
+    def __call__(self, model: PreTrainedModel) -> Generator:
+        """
+        Context manager to apply a compression method to a model.
+
+        Parameters
+        ----------
+        model : PreTrainedModel
+            Model to apply the compression method to
+        """
+        hooks = []
+        try:
+            for layer in model.model.layers:
+                if getattr(layer, "is_sliding", False):
+                    nncf_logger.warning("Compression is skipped for layers with sliding window attention")
+                    continue
+                layer.self_attn.rotary_emb = model.model.rotary_emb
+                hooks.append(layer.self_attn.register_forward_hook(self.forward_hook, with_kwargs=True))
+            yield
+        finally:
+            for forward_hook in hooks:
+                forward_hook.remove()

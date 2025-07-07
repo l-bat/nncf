@@ -75,6 +75,19 @@ class FP8Type(StrEnum):
 
 
 @api()
+class KVCacheCompressionMode(StrEnum):
+    """
+    Defines KV Cache Compression modes.
+
+    :param H2O: H2O compression mode.
+    :param SNAPKV: SnapKV compression mode.
+    """
+
+    H2O = "H2O"
+    SNAPKV = "SnapKV"
+
+
+@api()
 @dataclass
 class QuantizationParameters:
     """
@@ -427,6 +440,47 @@ class AdvancedAccuracyRestorerParameters:
     num_ranking_workers: Optional[int] = None
     intermediate_model_dir: Optional[str] = None
     restore_mode: RestoreMode = RestoreMode.ACTIVATIONS_AND_WEIGHTS
+
+
+@api()
+@dataclass
+class KVCacheCompressionParameters:
+    """
+    Contains parameters for KV cache compression algorithm.
+
+    :param algorithm: The KV cache compression algorithm.
+    :type algorithm: KVCacheCompressionMode
+    :param strategy: The eviction granularity, such as 'per_token', 'per_group'.
+    :type strategy: str
+    :param group_size: The size of the group for the per_group strategy.
+    :type group_size: int
+    :param start_size: The number of tokens in the beginning of the cache (least recent)
+        to be retained when applying KV cache compression.
+    :type start_size: int
+    :param recent_size: The number of most recent tokens to be retained when applying KV cache compression.
+    :type recent_size: int
+    :param intermediate_size: The number of tokens between the "start" and "recent" areas of KV cache that
+        will be considered for eviction.
+    :type intermediate_size: int
+    :param window_size: The size of the importance score aggregation window
+        (measured in token positions from the end of the prompt) used in the
+        KVCacheCompressionMode.SNAPKV algorithm to compute initial importance scores
+        at the start of the generation phase for eviction decisions,
+        following the SnapKV paper (https://arxiv.org/abs/2404.14469).
+    :type window_size: Optional[int]
+    :param score_aggregation: Represents the mode of per-token score aggregation
+        when determining least important tokens for eviction from cache. Supported values are 'sum' and 'max'.
+    :type score_aggregation: str
+    """
+
+    algorithm: KVCacheCompressionMode = KVCacheCompressionMode.SNAPKV
+    strategy: str = "per_token"
+    group_size: int = 32
+    start_size: int = 32
+    recent_size: int = 128
+    intermediate_size: int = 512
+    window_size: Optional[int] = None
+    score_aggregation: str = "sum"
 
 
 def changes_asdict(params: Any) -> dict[str, Any]:
