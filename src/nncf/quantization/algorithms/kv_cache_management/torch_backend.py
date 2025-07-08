@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import PreTrainedModel
 
@@ -54,7 +55,7 @@ class KVCacheCompressor:
             error_msg = "Window size is only supported for SNAPKV algorithm."
         elif self.window_size is not None and self.window_size <= 0:
             error_msg = "Window size must be a positive integer if specified."
-        elif self.strategy not in {"per_token"}:
+        elif self.strategy not in {"per_token", "per_group"}:
             error_msg = f"Strategy {self.strategy} is not supported. Supported strategies: 'per_token'."
 
         if error_msg:
@@ -152,6 +153,43 @@ class KVCacheCompressor:
         else:
             return self._scores[layer_idx] / self._cache_counter[layer_idx]
 
+    def get_intermediate_page_scores(self):
+        scores = self.get_scores()
+
+        # Pad cache with zeros to make it multiple by group_size
+        pad = scores.shape[-1] % self.group_size
+        if pad:
+            scores = F.pad(scores, (0, self.group_size - pad), mode="constant", value=0)
+
+        group_scores = scores.view(self.num_heads_to_keep, -1, self.group_size)
+        # TODO: Add norm group mode (divide by number of tokens in group if we use padding)
+        group_scores = group_scores.sum(-1) if self.group_mode == "sum" else group_scores.max(-1).values
+
+        num_recent_groups = self.recent_size // self.group_size
+        intermediate_group_scores = group_scores[:, :-num_recent_groups]
+
+        return intermediate_group_scores
+
+    def _convert_group_indices(self, group_indices, seq_len):
+        heads, num_groups = group_indices.shape
+        device = group_indices.device
+
+        # Create relative indices within each group
+        relative_idx = torch.arange(self.group_size, device=device).repeat(num_groups)
+        relative_idx = relative_idx.view(1, num_groups, self.group_size)
+
+        expanded_groups = group_indices.unsqueeze(-1).expand(-1, -1, self.group_size)
+        indices = expanded_groups * self.group_size + relative_idx
+        indices = indices.view(heads, -1)
+
+        # Trim padding from the last group if needed
+        remainder = seq_len % self.group_size
+        if remainder:
+            padded = self.group_size - remainder
+            indices = indices[:, :-padded]
+
+        return indices
+
     def get_remaining_indices(self, scores: torch.Tensor) -> torch.Tensor:
         """
         Computes the indices of the keep tokens in the KV cache after compression.
@@ -171,6 +209,28 @@ class KVCacheCompressor:
             seq_len = self.start_size + scores.shape[-1]
             keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=scores.device).unsqueeze(0)
             remaining_idx = torch.cat([keep_past, keep_topk, keep_recent], dim=-1)
+        elif self.strategy == "per_group":
+            # Pad scores with zeros to make it multiple by group_size
+            seq_len = self.start_size + scores.shape[-1]
+            pad = scores.shape[-1] % self.group_size
+            if pad:
+                scores = F.pad(scores, (0, self.group_size - pad), mode="constant", value=0)
+            group_scores = scores.view(-1, self.group_size).sum(-1)  # Sum token scores inside group
+
+            num_start_groups = self.start_size // self.group_size
+            num_recent_groups = self.recent_size // self.group_size
+            num_intermediate_groups = self.intermediate_size // self.group_size
+            num_groups = group_scores.shape[0]
+
+            _, keep_topk = torch.topk(group_scores[:-num_recent_groups], num_intermediate_groups, dim=-1)
+            keep_topk = keep_topk.sort().values + num_start_groups
+
+            keep_past = torch.arange(0, num_start_groups, device=scores.device)
+            keep_recent = (
+                torch.arange(num_groups - num_recent_groups, num_groups, device=scores.device) + num_start_groups
+            )
+            remaining_group_idx = torch.cat([keep_past, keep_topk, keep_recent], dim=-1).unsqueeze(0)
+            remaining_idx = self._convert_group_indices(remaining_group_idx, seq_len)
 
         return remaining_idx
 
