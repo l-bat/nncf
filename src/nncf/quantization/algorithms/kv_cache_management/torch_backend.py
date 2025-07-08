@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import PreTrainedModel
+from transformers.models.llama.modeling_llama import rotate_half
 
 from nncf import nncf_logger
 from nncf.quantization.advanced_parameters import KVCacheCompressionMode
@@ -34,10 +35,14 @@ class KVCacheCompressor:
         self.score_aggregation = eviction_parameters.score_aggregation
         self.strategy = eviction_parameters.strategy
         self.group_size = eviction_parameters.group_size if self.strategy == "per_group" else 1
+        self.apply_rerotation = eviction_parameters.apply_rerotation
         self._validate_arguments()
 
         self._scores = []
         self._cache_counter = None if self.score_aggregation == "sum" else []
+
+        self._cos_cache = None
+        self._sin_cache = None
 
     def _validate_arguments(self):
         """
@@ -74,6 +79,9 @@ class KVCacheCompressor:
         """
         self._scores = []
         self._cache_counter = None if self.score_aggregation == "sum" else []
+
+        self._cos_cache = None
+        self._sin_cache = None
 
     def _update_scores(self, layer_idx, attn_w):
         """
@@ -234,6 +242,50 @@ class KVCacheCompressor:
 
         return remaining_idx
 
+    def _get_rerotated_keys(self, key_states: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # Upcast to float32 temporarily for better accuracy
+        seq_len_after_eviction = key_states.shape[-2]
+
+        expected_cos = self._cos_cache[:, :seq_len_after_eviction, :].to(torch.float32)
+        expected_sin = self._sin_cache[:, :seq_len_after_eviction, :].to(torch.float32)
+
+        b, _, head_dim = self._cos_cache.shape
+        rot_mask = mask[:, 0]  # shape (batch, seq_len_after_eviction, head_dim)
+        current_cos = self._cos_cache.masked_select(rot_mask).view(b, -1, head_dim).to(torch.float32)
+        current_sin = self._sin_cache.masked_select(rot_mask).view(b, -1, head_dim).to(torch.float32)
+
+        rerotation_cos = expected_cos * current_cos + expected_sin * current_sin
+        rerotation_sin = expected_sin * current_cos - expected_cos * current_sin
+
+        rotated_key_states = key_states * rerotation_cos + rotate_half(key_states) * rerotation_sin
+        return rotated_key_states
+
+    def _update_cos_sin_cache(self, seq_len: int, kwargs: dict):
+        """
+        Updates the cos/sin caches if rerotation is applied.
+        This is necessary to ensure that the keys are rerotated correctly after compression.
+        """
+        if self.apply_rerotation:
+            cos, sin = kwargs["position_embeddings"]
+            using_rope = cos is not None and sin is not None
+            self.apply_rerotation = using_rope
+
+            if using_rope:
+                # BC: some models still pass `sin`/`cos` with 2 dims. In those models, they are the full sin/cos. Remove
+                # after all RoPE models have a llama-like cache utilization.
+                if cos.dim() == 2:
+                    self._cos_cache = cos.unsqueeze(0)
+                    self._sin_cache = sin.unsqueeze(0)
+                elif self._cos_cache is None or cos.shape[1] > 1:
+                    self._cos_cache = cos
+                    self._sin_cache = sin
+                elif seq_len < self._cos_cache.shape[1]:
+                    self._cos_cache = self._cos_cache[:, :seq_len, :]
+                    self._sin_cache = self._sin_cache[:, :seq_len, :]
+                else:
+                    self._cos_cache = torch.cat([self._cos_cache, cos], dim=1)
+                    self._sin_cache = torch.cat([self._sin_cache, sin], dim=1)
+
     def compress(
         self,
         layer_idx: int,
@@ -272,17 +324,21 @@ class KVCacheCompressor:
         # Prune keys and values
         mask = torch.zeros((indices.shape[0], keys.shape[-2]), dtype=torch.bool).to(keys.device)
         mask = mask.scatter(-1, indices, 1)
-        mask = mask.unsqueeze(0).unsqueeze(-1)  # Add batch and head_dim dimensions
+        mask = mask.unsqueeze(0).unsqueeze(-1)  # Add batch and head_dim dims, shape (B, H, upd_seq_len, head_dim)
 
         keys = keys.masked_select(mask).view(keys.shape[0], keys.shape[1], -1, keys.shape[-1])
         values = values.masked_select(mask).view(values.shape[0], values.shape[1], -1, values.shape[-1])
 
-        score_mask = mask[0, :, self.start_size :, 0]
+        score_mask = mask[0, :, self.start_size :, 0]  # shape (upd_seq_len,)
         self._scores[layer_idx] = (
             self._scores[layer_idx].masked_select(score_mask).view(self._scores[layer_idx].shape[0], -1)
         )
         if self.score_aggregation == "norm_sum":
             self._cache_counter[layer_idx] = self._cache_counter[layer_idx].masked_select(score_mask[0])
+
+        # Apply keys rerotation
+        if self.apply_rerotation:
+            keys = self._get_rerotated_keys(keys, mask)
 
         return keys, values
 
@@ -306,30 +362,34 @@ class KVCacheCompressor:
         -------
             Modified output of the forward pass of the layer.
         """
+        layer_idx = module.layer_idx
         cache = kwargs["past_key_value"]
-        keys = cache.key_cache[module.layer_idx]
-        values = cache.value_cache[module.layer_idx]
-        # print("Layer index:", module.layer_idx)
-
+        keys = cache.key_cache[layer_idx]
+        values = cache.value_cache[layer_idx]
+        seq_len = keys.shape[-2]
         attn_weights = output[1]
+
         # TODO: Support chunked prefill (prev_attn_weights.shape[-2] == 1 and current_attn_weights.shape[-2] != 1)
-        if module.layer_idx == 0 and attn_weights.shape[-2] != 1:
+        if layer_idx == 0 and attn_weights.shape[-2] != 1:
             self.clean()
 
-        self._update_scores(module.layer_idx, attn_weights)
+        self._update_scores(layer_idx, attn_weights)
 
-        seq_len = keys.shape[-2]
-        if module.layer_idx == 0:
+        # Update cos/sin caches if rerotation is applied
+        if layer_idx == 0 and self.apply_rerotation:
+            self._update_cos_sin_cache(seq_len, kwargs)
+
+        if layer_idx == 0:
             print(f"Current sequence length: {seq_len}, max cache size: {self.max_cache_size}")
         if seq_len > self.max_cache_size:
-            if module.layer_idx == 0:
+            if layer_idx == 0:
                 print("Before compression:", keys.shape)
-            keys, values = self.compress(module.layer_idx, keys, values, kwargs)
-            if module.layer_idx == 0:
+            keys, values = self.compress(layer_idx, keys, values, kwargs)
+            if layer_idx == 0:
                 print("After compression:", keys.shape)
 
-        cache.key_cache[module.layer_idx] = keys
-        cache.value_cache[module.layer_idx] = values
+        cache.key_cache[layer_idx] = keys
+        cache.value_cache[layer_idx] = values
         return output
 
     @contextmanager
@@ -344,8 +404,19 @@ class KVCacheCompressor:
         """
         hooks = []
         try:
+            attn_layer = model.model.layers[0].self_attn
+            if (
+                self.apply_rerotation
+                and getattr(attn_layer, "rotary_ndims", None) is not None
+                or getattr(attn_layer, "rotary_dim", None) is not None
+            ):
+                self.apply_rerotation = False
+                nncf_logger.warning(
+                    "Rerotation is not supported for models with partially rotated position embeddings. "
+                    "Compression will be applied without rerotation."
+                )
             for layer in model.model.layers:
-                if getattr(layer, "is_sliding", False):
+                if getattr(layer.self_attn, "is_sliding", False):
                     nncf_logger.warning("Compression is skipped for layers with sliding window attention")
                     continue
                 layer.self_attn.rotary_emb = model.model.rotary_emb

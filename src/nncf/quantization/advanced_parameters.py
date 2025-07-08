@@ -471,6 +471,10 @@ class KVCacheCompressionParameters:
     :param score_aggregation: Represents the mode of per-token score aggregation
         when determining least important tokens for eviction from cache. Supported values are 'sum' and 'max'.
     :type score_aggregation: str
+    :param apply_rerotation: Whether to apply keys rerotation during KV cache compression.
+        Rerotation is a technique that helps to maintain the quality of the model by rotating the keys
+        in the cache, which can help to reduce the impact of compression on the model's performance.
+    :type apply_rerotation: bool
     """
 
     algorithm: KVCacheCompressionMode = KVCacheCompressionMode.SNAPKV
@@ -481,6 +485,7 @@ class KVCacheCompressionParameters:
     intermediate_size: int = 512
     window_size: Optional[int] = None
     score_aggregation: str = "sum"
+    apply_rerotation: bool = True
 
 
 def changes_asdict(params: Any) -> dict[str, Any]:
