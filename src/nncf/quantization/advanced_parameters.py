@@ -88,6 +88,19 @@ class KVCacheCompressionMode(StrEnum):
 
 
 @api()
+class KVCacheRefinedSelection(StrEnum):
+    """
+    Defines KV Cache refined selection algorithms.
+
+    :param KVCrush: KVCrush algorithm.
+    :param CriticalKV: CriticalKV algorithm.
+    """
+
+    KVCRUSH = "KVCrush"
+    CRITICALKV = "CriticalKV"
+
+
+@api()
 @dataclass
 class QuantizationParameters:
     """
@@ -462,12 +475,10 @@ class KVCacheCompressionParameters:
     :param intermediate_size: The number of tokens between the "start" and "recent" areas of KV cache that
         will be considered for eviction.
     :type intermediate_size: int
-    :param window_size: The size of the importance score aggregation window
-        (measured in token positions from the end of the prompt) used in the
-        KVCacheCompressionMode.SNAPKV algorithm to compute initial importance scores
-        at the start of the generation phase for eviction decisions,
-        following the SnapKV paper (https://arxiv.org/abs/2404.14469).
-    :type window_size: Optional[int]
+    :param refined_size: The number of tokens within the intermediate region that will be selected
+        using a secondary, more refined scoring strategy (e.g., KVCrush, CriticalKV algo).
+        If set to 0 (default), the entire intermediate region is processed using the primary selection method.
+    :type refined_size: int
     :param score_aggregation: Represents the mode of per-token score aggregation
         when determining least important tokens for eviction from cache. Supported values are 'sum' and 'max'.
     :type score_aggregation: str
@@ -475,6 +486,19 @@ class KVCacheCompressionParameters:
         Rerotation is a technique that helps to maintain the quality of the model by rotating the keys
         in the cache, which can help to reduce the impact of compression on the model's performance.
     :type apply_rerotation: bool
+    :param window_size: The size of the importance score aggregation window
+        (measured in token positions from the end of the prompt) used in the
+        KVCacheCompressionMode.SNAPKV algorithm to compute initial importance scores
+        at the start of the generation phase for eviction decisions,
+        following the SnapKV paper (https://arxiv.org/abs/2404.14469).
+    :type window_size: Optional[int]
+    :param refined_algorithm: The algorithm used for refined selection of tokens
+        in the intermediate region, applied only if `refined_size > 0`. Defaults to KVCrush.
+    :type refined_algorithm: KVCacheRefinedSelection
+    :param kvcrush_anchor: The anchor point for the KVCrush algorithm,
+        which can be "alternate", "random", "zeros", "ones", or "mean". Defaults to "alternate".
+        This parameter is relevant only if `refined_algorithm` is set to KVCrush.
+    :type kvcrush_anchor: str
     """
 
     algorithm: KVCacheCompressionMode = KVCacheCompressionMode.SNAPKV
@@ -483,9 +507,12 @@ class KVCacheCompressionParameters:
     start_size: int = 32
     recent_size: int = 128
     intermediate_size: int = 512
-    window_size: Optional[int] = None
+    refined_size: int = 0
     score_aggregation: str = "sum"
     apply_rerotation: bool = True
+    window_size: Optional[int] = None
+    refined_algorithm: KVCacheRefinedSelection = KVCacheRefinedSelection.KVCRUSH
+    kvcrush_anchor: str = "alternate"
 
 
 def changes_asdict(params: Any) -> dict[str, Any]:
