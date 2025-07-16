@@ -14,7 +14,7 @@ import string
 from argparse import ArgumentParser
 from collections import Counter
 
-import datasets
+import datasets  # datasets==3.6.0
 import torch
 import transformers
 from rouge import Rouge
@@ -28,6 +28,9 @@ from nncf.quantization.advanced_parameters import KVCacheCompressionParameters
 from nncf.quantization.advanced_parameters import KVCacheRefinedSelection
 from nncf.quantization.algorithms.kv_cache_management.torch_backend import KVCacheCompressor
 
+
+import os
+os.environ['HF_TOKEN'] = ""
 
 def normalize_answer(s):
     """Lower text and remove punctuation, articles and extra whitespace."""
@@ -327,13 +330,13 @@ def preprocess_prompt(data_sample, subset):
 
 
 def post_process_pred(pred, subset, model_name):
-    if subset in ["samsum", "qsum", "hotpotqa", "qasper"] and "Llama-3" in model_name:
+    if subset in ["samsum", "qsum", "hotpotqa", "qasper"] and "Llama-3-" in model_name:
         pred = pred[: pred.find("assistant")]
     elif subset == "samsum":
         pred = pred[: pred.find("\nDialogue")]
     elif "Phi-3" in model_name and subset == "hotpotqa":
         pred = pred.lstrip("\n").split("\n")[0]
-    elif subset in ["trec", "hotpotqa", "qasper"] and "Qwen" in model_name:
+    elif subset in ["trec", "hotpotqa", "qasper"]:
         pred = pred[: pred.find("\nQuestion")]
     return pred
 
@@ -350,11 +353,11 @@ if __name__ == "__main__":
     parser.add_argument("--strategy", default="per_group", choices=["per_token", "per_group"])
     parser.add_argument("--refined_algorithm", default=None, choices=["criticalkv", "kvcrush"])
     parser.add_argument("--intermediate_size", type=int, default=2048)
-    parser.add_argument("--refined_size", type=int, default=0)
-    parser.add_argument("--anchor", type=str, default="alternate", choices=["alternate", "mean", "zeros", "onesrandom"])
     parser.add_argument("--recent_size", type=int, default=128)
     parser.add_argument("--start_size", type=int, default=32)
-    parser.add_argument("--score_aggregation", type=str, default="sum")
+    parser.add_argument("--refined_size", type=int, default=0)
+    parser.add_argument("--anchor", type=str, default="alternate", choices=["alternate", "mean", "zeros", "ones", "random"])
+    parser.add_argument("--score_aggregation", type=str, default="sum", choices=["sum", "norm_sum"])
     parser.add_argument("--group_size", type=int, default=32)
     parser.add_argument("--window_size", type=int, default=None)
     parser.add_argument("--apply_rerotation", action="store_true")
@@ -363,6 +366,7 @@ if __name__ == "__main__":
 
     if args.enable_eviction:
         algorthm = KVCacheCompressionMode.SNAPKV if args.algorithm == "snapkv" else KVCacheCompressionMode.H2O
+        refined_algorithm = None
         if args.refined_algorithm is not None:
             refined_algorithm = (
                 KVCacheRefinedSelection.CRITICALKV
@@ -392,52 +396,68 @@ if __name__ == "__main__":
         bnb_4bit_compute_dtype=torch.float16,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, token=os.environ['HF_TOKEN'])
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         attn_implementation="eager",
         trust_remote_code=True,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
-        quantization_config=quantization_config,
+        # quantization_config=quantization_config,
+        token=os.environ['HF_TOKEN'],
     )
+    model.generation_config.temperature=None
+    model.generation_config.top_p=None
+    model.generation_config.top_k=None
+
     model = model.eval()
 
     max_new_tokens = dataset2maxlen[args.subset]
     answers = []
-    for p_idx, data_sample in tqdm(enumerate(data)):
-        prompt = preprocess_prompt(data_sample, args.subset)
-        messages = [{"role": "user", "content": prompt}]
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+    max_length = 10000
+    with compress(model) if args.enable_eviction else torch.no_grad():
+        for p_idx, data_sample in tqdm(enumerate(data)):
+            prompt = preprocess_prompt(data_sample, args.subset)
+            messages = [{"role": "user", "content": prompt}]
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
 
-        inputs = tokenizer([prompt], truncation=False, return_tensors="pt").to(model.device)
+            inputs = tokenizer([prompt], truncation=False, return_tensors="pt").to(model.device)
+            if len(inputs.input_ids[0]) > max_length:
+                half = int(max_length / 2)
+                prompt = tokenizer.decode(inputs.input_ids[0][:half], skip_special_tokens=True) + tokenizer.decode(
+                    inputs.input_ids[0][-half:], skip_special_tokens=True
+                )
+                inputs = tokenizer([prompt], truncation=False, return_tensors="pt").to(model.device)
 
-        # with compress(model) if args.enable_eviction else torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
-            # use_cache=True,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
+            context_length = inputs.input_ids.shape[-1]
+            with torch.inference_mode():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    num_beams=1,
+                    do_sample=False,
+                    temperature=1.0,
+                    pad_token_id=tokenizer.eos_token_id,
+                    eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
+                )[0]
 
-        generate_answer = tokenizer.decode(outputs[0][inputs.input_ids.shape[-1] :], skip_special_tokens=True)
-        answers.append(
-            {
-                "answers": data_sample["answers"],
-                "all_classes": data_sample["all_classes"],
-                "pred": post_process_pred(generate_answer, args.subset, args.model),
-            }
-        )
+            generate_answer = tokenizer.decode(outputs[context_length:], skip_special_tokens=True)
+            answers.append(
+                {
+                    "answers": data_sample["answers"],
+                    "all_classes": data_sample["all_classes"],
+                    "pred": post_process_pred(generate_answer, args.subset, args.model),
+                }
+            )
+            del inputs, outputs
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()   # returns unused segments to the driver
+            gc.collect()
 
-        del inputs, outputs
-        torch.cuda.empty_cache()
-        gc.collect()
-
+    print(torch.cuda.memory_summary(device=model.device, abbreviated=True))
     score = evaluate(answers, args.subset)
     print(f"Score: {score}")

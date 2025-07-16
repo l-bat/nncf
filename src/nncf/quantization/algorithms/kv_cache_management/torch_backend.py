@@ -112,7 +112,7 @@ class KVCacheCompressor:
             if layer_scores is None:
                 hh_score = torch.max_pool1d(hh_score, kernel_size=7, padding=7 // 2, stride=1)
         else:
-            hh_score = attn_w.sum(0).sum(1)
+            hh_score = attn_w.sum(0).sum(1)  # Sum over batch and query length, shape: (H, seq_len)
 
         # num_attn_heads = hh_score.shape[0]
         # if num_attn_heads != 1:
@@ -124,6 +124,8 @@ class KVCacheCompressor:
 
         if layer_scores is None:
             layer_scores = hh_score
+            # if layer_idx == 0:
+            #     print("hh_score.shape", hh_score.shape, "attn_w", attn_w.shape)
             if is_norm_sum:
                 seq_len = layer_scores.shape[-1]  # seq_len without start_size
                 if self.window_size is not None:
@@ -145,6 +147,8 @@ class KVCacheCompressor:
                 else:
                     layer_counter = torch.arange(seq_len, 0, -1, dtype=layer_scores.dtype, device=layer_scores.device)
         else:
+            # if layer_idx == 0:
+            #     print("hh_score.shape", hh_score.shape, "layer_scores.shape", layer_scores.shape, "attn_w", attn_w.shape)
             num_new_tokens = hh_score.shape[-1] - layer_scores.shape[-1]
             hh_score[:, :-num_new_tokens] += layer_scores
             layer_scores = hh_score
@@ -187,7 +191,7 @@ class KVCacheCompressor:
 
         group_scores = scores.view(self.num_heads_to_keep, -1, self.group_size)
         # TODO: Add norm group mode (divide by number of tokens in group if we use padding)
-        group_scores = group_scores.sum(-1) if self.group_mode == "sum" else group_scores.max(-1).values
+        group_scores = group_scores.sum(-1) if self.score_aggregation == "sum" else group_scores.max(-1).values
 
         num_recent_groups = self.recent_size // self.group_size
         intermediate_group_scores = group_scores[:, :-num_recent_groups]
@@ -240,7 +244,7 @@ class KVCacheCompressor:
                 num_groups = full_binary.shape[0]
 
                 if self.kvcrush_anchor == "random":
-                    anchor_point = torch.randint(0, 2, (num_groups,), device=self._scores.device)
+                    anchor_point = torch.randint(0, 2, (num_groups,), device=scores.device)
                 elif self.kvcrush_anchor == "zeros":
                     anchor_point = torch.zeros(num_groups)
                 elif self.kvcrush_anchor == "ones":
@@ -439,14 +443,14 @@ class KVCacheCompressor:
 
         b, _, head_dim = self._cos_cache.shape
         rot_mask = mask[:, 0]  # shape (batch, seq_len_after_eviction, head_dim)
-        current_cos = self._cos_cache.masked_select(rot_mask).view(b, -1, head_dim).to(torch.float32)
-        current_sin = self._sin_cache.masked_select(rot_mask).view(b, -1, head_dim).to(torch.float32)
+        current_cos = self._cos_cache.masked_select(rot_mask).view_as(expected_cos).to(torch.float32)
+        current_sin = self._sin_cache.masked_select(rot_mask).view_as(expected_sin).to(torch.float32)
 
         rerotation_cos = expected_cos * current_cos + expected_sin * current_sin
         rerotation_sin = expected_sin * current_cos - expected_cos * current_sin
 
         rotated_key_states = key_states * rerotation_cos + rotate_half(key_states) * rerotation_sin
-        return rotated_key_states
+        return rotated_key_states.to(key_states.dtype)
 
     def _update_cos_sin_cache(self, seq_len: int, kwargs: dict):
         """
@@ -506,21 +510,23 @@ class KVCacheCompressor:
         """
         # Compute scores
         scores = self.get_scores(layer_idx)
-        assert scores.shape[-1] > self.recent_size
         indices = self.get_remaining_indices(scores, kwargs)
 
         # Prune keys and values
-        mask = torch.zeros((indices.shape[0], keys.shape[-2]), dtype=torch.bool).to(keys.device)
+        keep_heads = indices.shape[0]
+        B, H, seq_len, head_dim = keys.shape
+        mask = torch.zeros((keep_heads, seq_len), dtype=torch.bool).to(keys.device)  # shape (H, seq_len)
         mask = mask.scatter(-1, indices, 1)
         mask = mask.unsqueeze(0).unsqueeze(-1)  # Add batch and head_dim dims, shape (B, H, upd_seq_len, head_dim)
 
-        keys = keys.masked_select(mask).view(keys.shape[0], keys.shape[1], -1, keys.shape[-1])
-        values = values.masked_select(mask).view(values.shape[0], values.shape[1], -1, values.shape[-1])
+        keys = keys.masked_select(mask).view(B, H, -1, head_dim)
+        values = values.masked_select(mask).view_as(keys)
 
-        score_mask = mask[0, :, self.start_size :, 0]  # shape (upd_seq_len,)
-        self._scores[layer_idx] = (
-            self._scores[layer_idx].masked_select(score_mask).view(self._scores[layer_idx].shape[0], -1)
-        )
+        score_mask = mask[0, :, self.start_size :, 0]  # shape (H, upd_seq_len - self.start_size,)
+        self._scores[layer_idx] = self._scores[layer_idx].masked_select(score_mask).view(keep_heads, -1)
+        # if layer_idx == 0:
+        #     print("mask", sum(mask[0, 0, :, 0].int()))
+        #     print("upd", self._scores[layer_idx].shape, indices.shape, keys.shape, (B, H, seq_len, head_dim))
         if self.score_aggregation == "norm_sum":
             self._cache_counter[layer_idx] = self._cache_counter[layer_idx].masked_select(score_mask[0])
 
@@ -554,6 +560,7 @@ class KVCacheCompressor:
         cache = kwargs["past_key_value"]
         keys = cache.key_cache[layer_idx]
         values = cache.value_cache[layer_idx]
+
         seq_len = keys.shape[-2]
         attn_weights = output[1]
         if attn_weights is None:
@@ -570,18 +577,18 @@ class KVCacheCompressor:
         if layer_idx == 0 and self.apply_rerotation:
             self._update_cos_sin_cache(seq_len, kwargs)
 
-        if layer_idx == 0:
-            print(f"Current sequence length: {seq_len}, max cache size: {self.max_cache_size}")
+        # if layer_idx == 0:
+        #     print(f"Current sequence length: {seq_len}, max cache size: {self.max_cache_size}")
         if seq_len > self.max_cache_size:
-            if layer_idx == 0:
-                print("Before compression:", keys.shape)
+            # if layer_idx == 0:
+            #     print("Before compression:", keys.shape)
             if self.refined_size > 0 and self.refined_algorithm == KVCacheRefinedSelection.CRITICALKV:
                 kwargs["W_O"] = module.o_proj.weight
                 kwargs["values"] = values.permute(0, 2, 1, 3).reshape(seq_len, -1)
 
             keys, values = self.compress(layer_idx, keys, values, kwargs)
-            if layer_idx == 0:
-                print("After compression:", keys.shape)
+            # if layer_idx == 0:
+            #     print("After compression:", keys.shape)
 
         cache.key_cache[layer_idx] = keys
         cache.value_cache[layer_idx] = values
@@ -614,7 +621,8 @@ class KVCacheCompressor:
                 if getattr(layer.self_attn, "is_sliding", False):
                     nncf_logger.warning("Compression is skipped for layers with sliding window attention")
                     continue
-                layer.self_attn.rotary_emb = model.model.rotary_emb
+                if getattr(model.model, "rotary_emb", False):
+                    layer.self_attn.rotary_emb = model.model.rotary_emb
                 hooks.append(layer.self_attn.register_forward_hook(self.forward_hook, with_kwargs=True))
             yield
         finally:
