@@ -101,6 +101,21 @@ class KVCacheRefinedSelection(StrEnum):
 
 
 @api()
+class KVCachePrefillMode(StrEnum):
+    """
+    Defines prefill attention modes used during KV cache construction.
+
+    :param DENSE: Standard dense eager attention during prefill.
+    :param TRI_SHAPE: Tri-shaped sparse attention.
+    :param XATTN: Dynamic block sparse attention (X-Attention).
+    """
+
+    DENSE = "dense"
+    TRI_SHAPE = "tri-shape"
+    XATTN = "x-attention"
+
+
+@api()
 @dataclass
 class QuantizationParameters:
     """
@@ -499,6 +514,8 @@ class KVCacheCompressionParameters:
         which can be "alternate", "random", "zeros", "ones", or "mean". Defaults to "alternate".
         This parameter is relevant only if `refined_algorithm` is set to KVCrush.
     :type kvcrush_anchor: str
+    :param prefill_impl: The attention implementation during prefill stage.
+    :type prefill_impl: KVCacheCompressionMode
     """
 
     algorithm: KVCacheCompressionMode = KVCacheCompressionMode.SNAPKV
@@ -513,6 +530,7 @@ class KVCacheCompressionParameters:
     window_size: Optional[int] = None
     refined_algorithm: KVCacheRefinedSelection = KVCacheRefinedSelection.KVCRUSH
     kvcrush_anchor: str = "alternate"
+    prefill_impl: KVCachePrefillMode = KVCachePrefillMode.DENSE
 
 
 def changes_asdict(params: Any) -> dict[str, Any]:

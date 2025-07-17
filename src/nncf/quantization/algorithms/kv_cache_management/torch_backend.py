@@ -16,11 +16,18 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import PreTrainedModel
 from transformers.models.llama.modeling_llama import rotate_half
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from nncf import nncf_logger
 from nncf.quantization.advanced_parameters import KVCacheCompressionMode
 from nncf.quantization.advanced_parameters import KVCacheCompressionParameters
 from nncf.quantization.advanced_parameters import KVCacheRefinedSelection
+from nncf.quantization.advanced_parameters import KVCachePrefillMode
+from nncf.quantization.algorithms.kv_cache_management.sparse_prefill import xattention_forward
+from nncf.quantization.algorithms.kv_cache_management.sparse_prefill import tri_shape_attention_forward
+
+ALL_ATTENTION_FUNCTIONS.register("x-attention", xattention_forward)
+ALL_ATTENTION_FUNCTIONS.register("tri-shape", tri_shape_attention_forward)
 
 
 class KVCacheCompressor:
@@ -40,6 +47,7 @@ class KVCacheCompressor:
         self.group_size = eviction_parameters.group_size if self.strategy == "per_group" else 1
         self.apply_rerotation = eviction_parameters.apply_rerotation
         self.kvcrush_anchor = eviction_parameters.kvcrush_anchor
+        self.prefill_impl = eviction_parameters.prefill_impl
         self._validate_arguments()
 
         self._scores = []
@@ -434,49 +442,23 @@ class KVCacheCompressor:
 
         return remaining_idx
 
-    def _get_rerotated_keys(self, key_states: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def _get_rerotated_keys(self, key_states: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 temporarily for better accuracy
-        seq_len_after_eviction = key_states.shape[-2]
+        B, H, seq_len_after_eviction, head_dim = key_states.shape
+        dtype = key_states.dtype
+        key_states = key_states.to(torch.float32)
 
-        expected_cos = self._cos_cache[:, :seq_len_after_eviction, :].to(torch.float32)
-        expected_sin = self._sin_cache[:, :seq_len_after_eviction, :].to(torch.float32)
+        pos_ids = torch.arange(seq_len_after_eviction).unsqueeze(0).to(key_states.device)
+        after_cos, after_sin = self.rotary_emb(key_states, pos_ids)
 
-        b, _, head_dim = self._cos_cache.shape
-        rot_mask = mask[:, 0]  # shape (batch, seq_len_after_eviction, head_dim)
-        current_cos = self._cos_cache.masked_select(rot_mask).view_as(expected_cos).to(torch.float32)
-        current_sin = self._sin_cache.masked_select(rot_mask).view_as(expected_sin).to(torch.float32)
+        cur_ids = indices.to(key_states.device)
+        before_cos, before_sin = self.rotary_emb(key_states, cur_ids)
 
-        rerotation_cos = expected_cos * current_cos + expected_sin * current_sin
-        rerotation_sin = expected_sin * current_cos - expected_cos * current_sin
+        rerotation_cos = after_cos * before_cos + after_sin * before_sin
+        rerotation_sin = after_sin * before_cos - after_cos * before_sin
 
-        rotated_key_states = key_states * rerotation_cos + rotate_half(key_states) * rerotation_sin
-        return rotated_key_states.to(key_states.dtype)
-
-    def _update_cos_sin_cache(self, seq_len: int, kwargs: dict):
-        """
-        Updates the cos/sin caches if rerotation is applied.
-        This is necessary to ensure that the keys are rerotated correctly after compression.
-        """
-        if self.apply_rerotation:
-            cos, sin = kwargs["position_embeddings"]
-            using_rope = cos is not None and sin is not None
-            self.apply_rerotation = using_rope
-
-            if using_rope:
-                # BC: some models still pass `sin`/`cos` with 2 dims. In those models, they are the full sin/cos. Remove
-                # after all RoPE models have a llama-like cache utilization.
-                if cos.dim() == 2:
-                    self._cos_cache = cos.unsqueeze(0)
-                    self._sin_cache = sin.unsqueeze(0)
-                elif self._cos_cache is None:
-                    self._cos_cache = cos
-                    self._sin_cache = sin
-                elif seq_len <= self._cos_cache.shape[1]:
-                    self._cos_cache = self._cos_cache[:, :seq_len, :]
-                    self._sin_cache = self._sin_cache[:, :seq_len, :]
-                else:
-                    self._cos_cache = torch.cat([self._cos_cache, cos], dim=1)
-                    self._sin_cache = torch.cat([self._sin_cache, sin], dim=1)
+        rotated_key_states = key_states * rerotation_cos.unsqueeze(1) + rotate_half(key_states) * rerotation_sin.unsqueeze(1)
+        return rotated_key_states.to(dtype)
 
     def compress(
         self,
@@ -515,24 +497,22 @@ class KVCacheCompressor:
         # Prune keys and values
         keep_heads = indices.shape[0]
         B, H, seq_len, head_dim = keys.shape
-        mask = torch.zeros((keep_heads, seq_len), dtype=torch.bool).to(keys.device)  # shape (H, seq_len)
+        mask = torch.zeros((keep_heads, seq_len), dtype=torch.bool).to(keys.device)  # shape (keep_heads, seq_len)
         mask = mask.scatter(-1, indices, 1)
-        mask = mask.unsqueeze(0).unsqueeze(-1)  # Add batch and head_dim dims, shape (B, H, upd_seq_len, head_dim)
+        mask = mask.unsqueeze(0).unsqueeze(-1)
 
         keys = keys.masked_select(mask).view(B, H, -1, head_dim)
         values = values.masked_select(mask).view_as(keys)
 
-        score_mask = mask[0, :, self.start_size :, 0]  # shape (H, upd_seq_len - self.start_size,)
+        score_mask = mask[0, :, self.start_size :, 0]  # shape (keep_heads, seq_len - self.start_size,)
         self._scores[layer_idx] = self._scores[layer_idx].masked_select(score_mask).view(keep_heads, -1)
-        # if layer_idx == 0:
-        #     print("mask", sum(mask[0, 0, :, 0].int()))
-        #     print("upd", self._scores[layer_idx].shape, indices.shape, keys.shape, (B, H, seq_len, head_dim))
+
         if self.score_aggregation == "norm_sum":
             self._cache_counter[layer_idx] = self._cache_counter[layer_idx].masked_select(score_mask[0])
 
         # Apply keys rerotation
         if self.apply_rerotation:
-            keys = self._get_rerotated_keys(keys, mask)
+            keys = self._get_rerotated_keys(keys, indices)
 
         return keys, values
 
@@ -573,10 +553,6 @@ class KVCacheCompressor:
 
         self._update_scores(layer_idx, attn_weights)
 
-        # Update cos/sin caches if rerotation is applied
-        if layer_idx == 0 and self.apply_rerotation:
-            self._update_cos_sin_cache(seq_len, kwargs)
-
         # if layer_idx == 0:
         #     print(f"Current sequence length: {seq_len}, max cache size: {self.max_cache_size}")
         if seq_len > self.max_cache_size:
@@ -605,6 +581,11 @@ class KVCacheCompressor:
             Model to apply the compression method to
         """
         hooks = []
+        self.rotary_emb = model.model.rotary_emb
+        if self.prefill_impl == KVCachePrefillMode.XATTN:
+            model.config._attn_implementation = "x-attention"
+        elif self.prefill_impl == KVCachePrefillMode.TRI_SHAPE:
+            model.config._attn_implementation = "tri-shape"
         try:
             attn_layer = model.model.layers[0].self_attn
             if (

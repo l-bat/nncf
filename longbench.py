@@ -361,6 +361,7 @@ if __name__ == "__main__":
     parser.add_argument("--group_size", type=int, default=32)
     parser.add_argument("--window_size", type=int, default=None)
     parser.add_argument("--apply_rerotation", action="store_true")
+    parser.add_argument("--prefill_impl", default="dense", choices=["dense", "tri-shape", "x-attention"])
 
     args = parser.parse_args()
 
@@ -385,6 +386,7 @@ if __name__ == "__main__":
             apply_rerotation=args.apply_rerotation,
             refined_size=args.refined_size,
             refined_algorithm=refined_algorithm,
+            prefill_impl=args.prefill_impl,
         )
         compress = KVCacheCompressor(eviction_parameters=eviction_parameters)
 
@@ -458,6 +460,5 @@ if __name__ == "__main__":
             torch.cuda.ipc_collect()   # returns unused segments to the driver
             gc.collect()
 
-    print(torch.cuda.memory_summary(device=model.device, abbreviated=True))
     score = evaluate(answers, args.subset)
     print(f"Score: {score}")
