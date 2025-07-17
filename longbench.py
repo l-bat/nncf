@@ -20,6 +20,7 @@ import transformers
 from rouge import Rouge
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
+from transformers import AutoConfig
 from transformers import AutoTokenizer
 from transformers import BitsAndBytesConfig
 
@@ -31,6 +32,10 @@ from nncf.quantization.algorithms.kv_cache_management.torch_backend import KVCac
 
 import os
 os.environ['HF_TOKEN'] = ""
+
+# AttributeError: 'DynamicCache' object has no attribute 'get_max_length'. Did you mean: 'get_seq_length'?
+# The method get_max_length of 'DynamicCache' is deprecated and has been removed in transformer 4.49 (Phi3 and DeepSeek issue)
+# fix: https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/commit/faea2faa9ec002397d20e90dae777c4252022f3a
 
 def normalize_answer(s):
     """Lower text and remove punctuation, articles and extra whitespace."""
@@ -399,8 +404,10 @@ if __name__ == "__main__":
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, token=os.environ['HF_TOKEN'])
+    config = AutoConfig.from_pretrained(args.model, trust_remote_code=True, attn_implementation="eager", output_attentions=True)
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
+        config=config,
         attn_implementation="eager",
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
@@ -411,14 +418,13 @@ if __name__ == "__main__":
     model.generation_config.temperature=None
     model.generation_config.top_p=None
     model.generation_config.top_k=None
-
     model = model.eval()
 
     max_new_tokens = dataset2maxlen[args.subset]
     answers = []
     max_length = 10000
     with compress(model) if args.enable_eviction else torch.no_grad():
-        for p_idx, data_sample in tqdm(enumerate(data)):
+        for p_idx, data_sample in enumerate(tqdm(data)):
             prompt = preprocess_prompt(data_sample, args.subset)
             messages = [{"role": "user", "content": prompt}]
             prompt = tokenizer.apply_chat_template(

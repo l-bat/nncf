@@ -581,7 +581,11 @@ class KVCacheCompressor:
             Model to apply the compression method to
         """
         hooks = []
-        self.rotary_emb = model.model.rotary_emb
+        if hasattr(model.model, "rotary_emb"):
+            self.rotary_emb = model.model.rotary_emb
+        else:
+            self.rotary_emb = model.model.layers[0].self_attn.rotary_emb
+
         if self.prefill_impl == KVCachePrefillMode.XATTN:
             model.config._attn_implementation = "x-attention"
         elif self.prefill_impl == KVCachePrefillMode.TRI_SHAPE:
