@@ -16,18 +16,11 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import PreTrainedModel
 from transformers.models.llama.modeling_llama import rotate_half
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from nncf import nncf_logger
 from nncf.quantization.advanced_parameters import KVCacheCompressionMode
 from nncf.quantization.advanced_parameters import KVCacheCompressionParameters
 from nncf.quantization.advanced_parameters import KVCacheRefinedSelection
-from nncf.quantization.advanced_parameters import KVCachePrefillMode
-from nncf.quantization.algorithms.kv_cache_management.sparse_prefill import xattention_forward
-from nncf.quantization.algorithms.kv_cache_management.sparse_prefill import tri_shape_attention_forward
-
-ALL_ATTENTION_FUNCTIONS.register("x-attention", xattention_forward)
-ALL_ATTENTION_FUNCTIONS.register("tri-shape", tri_shape_attention_forward)
 
 
 class KVCacheCompressor:
@@ -47,7 +40,6 @@ class KVCacheCompressor:
         self.group_size = eviction_parameters.group_size if self.strategy == "per_group" else 1
         self.apply_rerotation = eviction_parameters.apply_rerotation
         self.kvcrush_anchor = eviction_parameters.kvcrush_anchor
-        self.prefill_impl = eviction_parameters.prefill_impl
         self._validate_arguments()
 
         self._scores = []
@@ -553,18 +545,11 @@ class KVCacheCompressor:
 
         self._update_scores(layer_idx, attn_weights)
 
-        # if layer_idx == 0:
-        #     print(f"Current sequence length: {seq_len}, max cache size: {self.max_cache_size}")
         if seq_len > self.max_cache_size:
-            # if layer_idx == 0:
-            #     print("Before compression:", keys.shape)
             if self.refined_size > 0 and self.refined_algorithm == KVCacheRefinedSelection.CRITICALKV:
                 kwargs["W_O"] = module.o_proj.weight
                 kwargs["values"] = values.permute(0, 2, 1, 3).reshape(seq_len, -1)
-
             keys, values = self.compress(layer_idx, keys, values, kwargs)
-            # if layer_idx == 0:
-            #     print("After compression:", keys.shape)
 
         cache.key_cache[layer_idx] = keys
         cache.value_cache[layer_idx] = values
@@ -581,17 +566,20 @@ class KVCacheCompressor:
             Model to apply the compression method to
         """
         hooks = []
-        if hasattr(model.model, "rotary_emb"):
-            self.rotary_emb = model.model.rotary_emb
-        else:
-            self.rotary_emb = model.model.layers[0].self_attn.rotary_emb
-
-        if self.prefill_impl == KVCachePrefillMode.XATTN:
-            model.config._attn_implementation = "x-attention"
-        elif self.prefill_impl == KVCachePrefillMode.TRI_SHAPE:
-            model.config._attn_implementation = "tri-shape"
         try:
-            attn_layer = model.model.layers[0].self_attn
+            llm = model
+            if hasattr(llm, "model"):
+                llm = llm.model
+            if hasattr(llm, "language_model"):
+                llm = llm.language_model
+
+            if self.apply_rerotation:
+                if hasattr(llm, "rotary_emb"):
+                    self.rotary_emb = llm.rotary_emb
+                elif hasattr(llm, "layers"):
+                    self.rotary_emb = llm.layers[0].self_attn.rotary_emb
+
+            attn_layer = llm.layers[0].self_attn
             if (
                 self.apply_rerotation
                 and getattr(attn_layer, "rotary_ndims", None) is not None
@@ -602,12 +590,10 @@ class KVCacheCompressor:
                     "Rerotation is not supported for models with partially rotated position embeddings. "
                     "Compression will be applied without rerotation."
                 )
-            for layer in model.model.layers:
+            for layer in llm.layers:
                 if getattr(layer.self_attn, "is_sliding", False):
                     nncf_logger.warning("Compression is skipped for layers with sliding window attention")
                     continue
-                if getattr(model.model, "rotary_emb", False):
-                    layer.self_attn.rotary_emb = model.model.rotary_emb
                 hooks.append(layer.self_attn.register_forward_hook(self.forward_hook, with_kwargs=True))
             yield
         finally:

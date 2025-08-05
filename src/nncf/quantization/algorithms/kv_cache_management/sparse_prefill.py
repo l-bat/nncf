@@ -8,32 +8,320 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
+from typing import Callable, Generator, Optional
+from contextlib import contextmanager
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+from transformers import PreTrainedModel
 
 from transformers.models.llama.modeling_llama import repeat_kv
+from nncf.quantization.advanced_parameters import KVCachePrefillMode
 
 # pip install git+https://github.com/mit-han-lab/Block-Sparse-Attention.git
 from block_sparse_attn import block_sparse_attn_func
 
 
-def dense_attn_kernel(query_states, key_states, value_states, attention_mask, overflow_fix=False):
-    key_states, value_states = key_states.to(query_states.device), value_states.to(query_states.device)
-    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / (query_states.shape[-1] ** 0.5)
+class SparsePrefill:
+    def __init__(
+        self,
+        algorithm: KVCachePrefillMode,
+        threshold: float = 0.8,
+        last_query_size: int = 100,
+        recent_size: int = 1920,
+        return_attn_scores: bool = False,
+    ):
+        self.algorithm = algorithm
+        self.threshold = threshold
+        self.last_query_size = last_query_size
+        self.recent_size = recent_size
+        self.return_attn_scores = return_attn_scores
+        self._original_attn_impl = None
 
-    if overflow_fix and query_states.dtype == torch.float16:
-        attn_weights = torch.where(torch.isinf(attn_weights), torch.zeros_like(attn_weights), attn_weights)
+    def _get_prefill_impl(self) -> Callable:
+        if self.algorithm == KVCachePrefillMode.XATTN:
+            return xattention_forward
+        elif self.algorithm == KVCachePrefillMode.TRI_SHAPE:
+            return tri_shape_forward
+        elif self.algorithm == KVCachePrefillMode.DENSE:
+            return dense_forward
+        else:
+            raise ValueError(f"Unknown algorithm: {self.algorithm}")
 
-    if attention_mask is not None:  # no matter the length, we just slice it
+    def store_original_forward(self, model: PreTrainedModel):
+        if "Qwen2_5_VLForConditionalGeneration" in model.config.architectures:
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import eager_attention_forward
+            self._original_attn_impl = eager_attention_forward
+        elif "Qwen2VLForConditionalGeneration" in model.config.architectures:
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import eager_attention_forward
+            self._original_attn_impl = eager_attention_forward
+        elif "LlavaForConditionalGeneration" in model.config.architectures:
+            from transformers.models.llama.modeling_llama import eager_attention_forward
+            self._original_attn_impl = eager_attention_forward
+        elif "LlavaNextForConditionalGeneration" in model.config.architectures:
+            if "LlamaForCausalLM" in model.config.text_config.architectures:
+                from transformers.models.llama.modeling_llama import eager_attention_forward
+                from transformers.models.llama.modeling_llama import repeat_kv
+            elif "MistralForCausalLM" in model.config.text_config.architectures:
+                from transformers.models.mistral.modeling_mistral import eager_attention_forward
+            self._original_attn_impl = eager_attention_forward
+        else:
+            raise ValueError(f"Unsupported model class for: {model.config.architectures[0]}")
+
+    def reset_forward(self, model: PreTrainedModel, eager_impl: Callable):
+        if "Qwen2_5_VLForConditionalGeneration" in model.config.architectures:
+            import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as modeling
+            modeling.eager_attention_forward = eager_impl
+        elif "Qwen2VLForConditionalGeneration" in model.config.architectures:
+            import transformers.models.qwen2_vl.modeling_qwen2_vl as modeling
+            modeling.eager_attention_forward = eager_impl
+        elif "LlavaForConditionalGeneration" in model.config.architectures:
+            import transformers.models.llama.modeling_llama as modeling
+            modeling.eager_attention_forward = eager_impl
+        elif "LlavaNextForConditionalGeneration" in model.config.architectures:
+            if "LlamaForCausalLM" in model.config.text_config.architectures:
+                import transformers.models.llama.modeling_llama as modeling
+            elif "MistralForCausalLM" in model.config.text_config.architectures:
+                import transformers.models.mistral.modeling_mistral as modeling
+            modeling.eager_attention_forward = eager_impl
+        else:
+            raise ValueError(f"Unsupported model class for: {model.config.architectures[0]}")
+
+    @contextmanager
+    def __call__(self, model: PreTrainedModel) -> Generator:
+        try:
+            llm = model
+            if hasattr(llm, "model"):
+                llm = llm.model
+            if hasattr(llm, "language_model"):
+                llm = llm.language_model
+
+            assert llm.config._attn_implementation == "eager"
+
+            self.store_original_forward(model)
+            attention_interface = self._get_prefill_impl()
+            self.reset_forward(model, attention_interface)
+
+            yield
+        finally:
+            self.reset_forward(model, self._original_attn_impl)
+
+def dense_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    **kwargs,
+):
+    if key_states.shape[1] != query.shape[1]:
+        key_states = repeat_kv(key_states, module.num_key_value_groups)
+        value_states = repeat_kv(value_states, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
         causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
 
-    # upcast attention to fp32
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights if kwargs.get("return_attn_scores", False) else None
+
+
+def tri_shape_forward(
+    module: nn.Module,
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    **kwargs,
+):
+    # Sparse Attention is not supported on decoding
+    if query_states.shape[-2] == 1:
+        return dense_forward(module, query_states, key_states, value_states, attention_mask, scaling)
+
+    key_states = repeat_kv(key_states, module.num_key_value_groups)
+    value_states = repeat_kv(value_states, module.num_key_value_groups)
+
+    last_query_size = kwargs.get("last_query_size", 100)
+    if kwargs.get("return_attn_scores", False):
+        query_states_2 = query_states[:,:,-last_query_size:]
+        attention_mask = attention_mask[:, :, -last_query_size:] if attention_mask is not None else None
+        _, attn_weights = dense_forward(module, query_states_2, key_states, value_states, attention_mask, scaling)
+    else:
+        attn_weights = None
+
+    batch_size, num_head, q_len, head_dim = query_states.shape
+    k_len = key_states.shape[2]
+    assert k_len == q_len
+    block_size = 128
+    q_block_num = (q_len + block_size - 1) // block_size
+    k_block_num = (k_len + block_size - 1) // block_size
+    q_cu_seq_lens = torch.tensor([0, q_len], dtype=torch.int32, device=query_states.device)
+    k_cu_seq_lens = torch.tensor([0, k_len], dtype=torch.int32, device=query_states.device)
+    head_mask_type = torch.tensor([1 for _ in range(num_head)], device=query_states.device, dtype=torch.int32)
+    simple_masks = torch.zeros(
+        (1, num_head, q_block_num, k_block_num),
+        dtype=torch.bool,
+        device=query_states.device,
+    )
+    # keep_sink
+    simple_masks[:, :, 0, :] = True # keep first 128 tokens
+
+    # keep_recent
+    recent_size = kwargs.get("recent_size", 1024)
+    local_block_num = (recent_size + block_size - 1) // block_size
+    q_idx = torch.arange(q_block_num, device=simple_masks.device).unsqueeze(1)  # shape: [Q, 1]
+    k_idx = torch.arange(k_block_num, device=simple_masks.device).unsqueeze(0)  # shape: [1, K]
+
+    keep_recent_mask = (k_idx <= q_idx) & (k_idx >= (q_idx - local_block_num))  # [Q, K]
+    keep_recent_mask = keep_recent_mask.unsqueeze(0).unsqueeze(0).expand(
+        1, num_head, q_block_num, k_block_num
+    ).to(simple_masks.device)
+    simple_masks |= keep_recent_mask
+
+    # keep_q_lasts
+    padded_len = q_block_num * block_size - q_len
+    last_blocks_to_keep = (last_query_size + padded_len + block_size - 1) // block_size  # ceil(a / b) == (a + b - 1) // b
+    keep_q_lasts_mask = (k_idx <= q_idx) & (q_idx >= (q_block_num - last_blocks_to_keep))
+    keep_q_lasts_mask = keep_q_lasts_mask.unsqueeze(0).unsqueeze(0).expand(
+        1, num_head, q_block_num, k_block_num
+    ).to(simple_masks.device)
+    simple_masks |= keep_q_lasts_mask
+
+    query_states = query_states.transpose(1, 2).view(q_len, num_head, head_dim)
+    key_states = key_states.transpose(1, 2).view(k_len, num_head, head_dim).to(query_states.device)
+    value_states = value_states.transpose(1, 2).view(k_len, num_head, head_dim).to(query_states.device)
+
+    attn_output = block_sparse_attn_func(
+        query_states,
+        key_states,
+        value_states,
+        q_cu_seq_lens,
+        k_cu_seq_lens,
+        head_mask_type,
+        None,
+        simple_masks[:, :, :q_block_num, :k_block_num].contiguous(),
+        q_len,
+        k_len,
+        p_dropout=0.0,
+        deterministic=True,
+        is_causal=True,
+    )
+    attn_output = attn_output.view(batch_size, q_len, num_head, head_dim)
+
+    return attn_output, attn_weights
+
+
+def xattention_forward(
+    module: nn.Module,
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    stride: int = 16,
+    block_size: int = 128,
+    **kwargs,
+):
+    # Sparse Attention is not supported on decoding
+    if query_states.shape[-2] == 1:
+        return dense_forward(module, query_states, key_states, value_states, attention_mask, scaling)
+
+    key_states = repeat_kv(key_states, module.num_key_value_groups)
+    value_states = repeat_kv(value_states, module.num_key_value_groups)
+
+    batch_size, num_kv_head, k_len, head_dim = key_states.shape
+    _, num_q_head, q_len, _ = query_states.shape
+    assert num_q_head == num_kv_head
+
+    q_block_num = (q_len + block_size - 1) // block_size
+    k_block_num = (k_len + block_size - 1) // block_size
+
+    chunk_size = int(
+        max(
+            min(
+                max(2048, 1 << (k_len - 1).bit_length()),  #  next power of two ≥ k_len
+                128 * 1024 * 2048 // (1 << (k_len - 1).bit_length()),  #  # upper bound
+            ),
+            2048,  # lower bound
+        )
+    )
+
+    last_query_size = kwargs.get("last_query_size", 100)
+    if kwargs.get("return_attn_scores", False):
+        query_states_2 = query_states[:,:,-last_query_size:]
+        attention_mask = attention_mask[:, :, -last_query_size:] if attention_mask is not None else None
+        _, attn_weights = dense_forward(module, query_states_2, key_states, value_states, attention_mask, scaling)
+    else:
+        attn_weights = None
+
+    _, approx_simple_mask = xattn_estimate(
+        query_states,
+        key_states,
+        block_size=block_size,
+        stride=stride,
+        threshold=kwargs.get("threshold", 0.8),
+        chunk_size=chunk_size,
+        keep_sink=False,
+        keep_recent=False,
+    )
+
+    if approx_simple_mask.shape[1] != num_kv_head:
+        approx_simple_mask = approx_simple_mask.expand(-1, num_kv_head, -1, -1)
+
+    assert block_size == 128  # dense attn for last block (n_last = 100 <= block_size = 128)
+    assert batch_size == 1
+    query_states = query_states.transpose(1, 2).view(q_len, num_kv_head, head_dim)
+    key_states = key_states.transpose(1, 2).view(k_len, num_kv_head, head_dim)
+    value_states = value_states.transpose(1, 2).view(k_len, num_kv_head, head_dim)
+    q_cu_seq_lens = torch.tensor([0, q_len], dtype=torch.int32, device=query_states.device)
+    k_cu_seq_lens = torch.tensor([0, k_len], dtype=torch.int32, device=query_states.device)
+    head_mask_type = torch.tensor([1 for _ in range(num_kv_head)], device=query_states.device, dtype=torch.int32)
+    assert head_mask_type.device == query_states.device
+    assert q_cu_seq_lens.device == query_states.device
+    assert k_cu_seq_lens.device == query_states.device
+    assert key_states.device == query_states.device
+    assert value_states.device == query_states.device
+    assert approx_simple_mask.device == query_states.device
+
+    approx_simple_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous()
+    attn_output = block_sparse_attn_func(
+        query_states,
+        key_states,
+        value_states,
+        q_cu_seq_lens,
+        k_cu_seq_lens,
+        head_mask_type,
+        None,
+        approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous(),
+        q_len,
+        k_len,
+        p_dropout=0.0,
+        deterministic=True,
+        is_causal=True,
+        return_attn_probs=False,
+    )
+    attn_output = attn_output.view(batch_size, q_len, num_kv_head, head_dim) #.transpose(1, 2)
+
+    # sparsity_level
+    # B, H, Qb, Kb = approx_simple_mask[:, :, :q_block_num, :k_block_num].shape
+    # causal_mask = torch.zeros_like(approx_simple_mask[:, :, :q_block_num, :k_block_num], dtype=torch.bool)
+    # for q in range(Qb):
+    #     causal_mask[:, :, q, : q + 1] = True  # Allow access to current and previous blocks
+    # used_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num]
+    # selected_blocks = used_mask.sum()
+    # allowed_blocks = causal_mask.sum()
+    # sparsity_level = float(1 - selected_blocks.item() / allowed_blocks.item())
+    # num_to_compute = (k_block_num + 1) * k_block_num / 2 * num_kv_head
+    # sparsity_level = 1 - approx_simple_mask.sum() / approx_simple_mask.nelement()
+    # print(f"approximated prefilling Computation: {approx_simple_mask.sum() / approx_simple_mask.nelement()}")
+    # return attn_output, (attn_weights, sparsity_level)
     return attn_output, attn_weights
 
 
@@ -184,96 +472,6 @@ def find_blocks_chunked(
             assert(torch.where(lambda_mask,mask,True).all())
 
     return mask
-
-
-def xattention_kernel(query_states, key_states, value_states, attention_mask, overflow_fix=False, stride=16, block_size=128):
-    THRESHOLD = 0.8
-    batch_size, num_kv_head, k_len, head_dim = key_states.shape
-    _, num_q_head, q_len, _ = query_states.shape
-    assert num_q_head == num_kv_head
-
-    q_block_num = (q_len + block_size - 1) // block_size
-    k_block_num = (k_len + block_size - 1) // block_size
-
-    chunk_size = int(
-        max(
-            min(
-                max(2048, 1 << (k_len - 1).bit_length()),  #  next power of two ≥ k_len
-                128 * 1024 * 2048 // (1 << (k_len - 1).bit_length()),  #  # upper bound
-            ),
-            2048,  # lower bound
-        )
-    )
-
-    n_last = 100
-    query_states_2 = query_states[:,:,-n_last:]
-    attention_mask = attention_mask[:, :, -q_last:] if attention_mask is not None else None
-    _, attn_weights = dense_attn_kernel(query_states_2, key_states, value_states, attention_mask, overflow_fix)
-
-    attn_sums, approx_simple_mask = xattn_estimate(
-        query_states,
-        key_states,
-        block_size=block_size,
-        stride=stride,
-        threshold=THRESHOLD,
-        chunk_size=chunk_size,
-        keep_sink=False,
-        keep_recent=False,
-    )
-
-    if approx_simple_mask.shape[1] != num_kv_head:
-        approx_simple_mask = approx_simple_mask.expand(-1, num_kv_head, -1, -1)
-
-    assert block_size == 128  # dense attn for last block (q_last = 100 <= block_size = 128)
-    assert batch_size == 1
-    query_states = query_states.transpose(1, 2).view(q_len, num_kv_head, head_dim)
-    key_states = key_states.transpose(1, 2).view(k_len, num_kv_head, head_dim)
-    value_states = value_states.transpose(1, 2).view(k_len, num_kv_head, head_dim)
-    q_cu_seq_lens = torch.tensor([0, q_len], dtype=torch.int32, device=query_states.device)
-    k_cu_seq_lens = torch.tensor([0, k_len], dtype=torch.int32, device=query_states.device)
-    head_mask_type = torch.tensor([1 for _ in range(num_kv_head)], device=query_states.device, dtype=torch.int32)
-    assert head_mask_type.device == query_states.device
-    assert q_cu_seq_lens.device == query_states.device
-    assert k_cu_seq_lens.device == query_states.device
-    assert key_states.device == query_states.device
-    assert value_states.device == query_states.device
-    assert approx_simple_mask.device == query_states.device
-
-    approx_simple_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous()
-    attn_output = block_sparse_attn_func(
-        query_states,
-        key_states,
-        value_states,
-        q_cu_seq_lens,
-        k_cu_seq_lens,
-        head_mask_type,
-        None,
-        approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous(),
-        q_len,
-        k_len,
-        p_dropout=0.0,
-        deterministic=True,
-        is_causal=True,
-        return_attn_probs=False,
-    )
-    attn_output = attn_output.view(batch_size, q_len, num_kv_head, head_dim).transpose(1, 2)
-
-    B, H, Qb, Kb = approx_simple_mask[:, :, :q_block_num, :k_block_num].shape
-    causal_mask = torch.zeros_like(approx_simple_mask[:, :, :q_block_num, :k_block_num], dtype=torch.bool)
-    for q in range(Qb):
-        causal_mask[:, :, q, : q + 1] = True  # Allow access to current and previous blocks
-    used_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num]
-    selected_blocks = used_mask.sum()
-    allowed_blocks = causal_mask.sum()
-
-    sparsity_level = float(1 - selected_blocks.item() / allowed_blocks.item())
-
-    # num_to_compute = (k_block_num + 1) * k_block_num / 2 * num_kv_head
-    # sparsity_level = 1 - approx_simple_mask.sum() / approx_simple_mask.nelement()
-    # print(f"approximated prefilling Computation: {approx_simple_mask.sum() / approx_simple_mask.nelement()}")
-    # del approx_simple_mask, attn_sums
-    # return attn_output, (attn_weights, sparsity_level)
-    return attn_output, attn_weights
 
 
 def xattn_estimate(
@@ -454,110 +652,3 @@ def xattn_estimate(
         )
 
     return attn_sums, simple_masks
-
-
-def tri_shape_kernel(query_states, key_states, value_states, attention_mask, **kwargs):
-    q_last = kwargs.get("n_last", 100)
-    overflow_fix = kwargs.get("overflow_fix", False)
-    
-    query_states_2 = query_states[:,:,-q_last:]
-    attention_mask = attention_mask[:, :, -q_last:] if attention_mask is not None else None
-    _, attn_weights = dense_attn_kernel(query_states_2, key_states, value_states, attention_mask, overflow_fix)
-
-    batch_size, num_head, q_len, head_dim = query_states.shape
-    k_len = key_states.shape[2]
-    assert k_len == q_len
-    block_size = 128
-    q_block_num = (q_len + block_size - 1) // block_size
-    k_block_num = (k_len + block_size - 1) // block_size
-    q_cu_seq_lens = torch.tensor([0, q_len], dtype=torch.int32, device=query_states.device)
-    k_cu_seq_lens = torch.tensor([0, k_len], dtype=torch.int32, device=query_states.device)
-    head_mask_type = torch.tensor([1 for _ in range(num_head)], device=query_states.device, dtype=torch.int32)
-    simple_masks = torch.zeros(
-        (1, num_head, q_block_num, k_block_num),
-        dtype=torch.bool,
-        device=query_states.device,
-    )
-    # keep_sink
-    simple_masks[:, :, 0, :] = True # keep first 128 tokens
-
-    # keep_recent
-    n_local = kwargs.get("n_local", 1024)
-    local_block_num = (n_local + block_size - 1) // block_size
-    q_idx = torch.arange(q_block_num, device=simple_masks.device).unsqueeze(1)  # shape: [Q, 1]
-    k_idx = torch.arange(k_block_num, device=simple_masks.device).unsqueeze(0)  # shape: [1, K]
-
-    keep_recent_mask = (k_idx <= q_idx) & (k_idx >= (q_idx - local_block_num))  # [Q, K]
-    keep_recent_mask = keep_recent_mask.unsqueeze(0).unsqueeze(0).expand(
-        1, num_head, q_block_num, k_block_num
-    ).to(simple_masks.device)
-    simple_masks |= keep_recent_mask
-
-    # keep_q_lasts
-    padded_len = q_block_num * block_size - q_len
-    last_blocks_to_keep = (q_last + padded_len + block_size - 1) // block_size  # ceil(a / b) == (a + b - 1) // b
-    keep_q_lasts_mask = (k_idx <= q_idx) & (q_idx >= (q_block_num - last_blocks_to_keep))
-    keep_q_lasts_mask = keep_q_lasts_mask.unsqueeze(0).unsqueeze(0).expand(
-        1, num_head, q_block_num, k_block_num
-    ).to(simple_masks.device)
-    simple_masks |= keep_q_lasts_mask
-    
-    query_states = query_states.transpose(1, 2).view(q_len, num_head, head_dim)
-    key_states = key_states.transpose(1, 2).view(k_len, num_head, head_dim).to(query_states.device)
-    value_states = value_states.transpose(1, 2).view(k_len, num_head, head_dim).to(query_states.device)
-
-    attn_output = block_sparse_attn_func(
-        query_states,
-        key_states,
-        value_states,
-        q_cu_seq_lens,
-        k_cu_seq_lens,
-        head_mask_type,
-        None,
-        simple_masks[:, :, :q_block_num, :k_block_num].contiguous(),
-        q_len,
-        k_len,
-        p_dropout=0.0,
-        deterministic=True,
-        is_causal=True,
-    )
-    attn_output = attn_output.view(batch_size, q_len, num_head, head_dim).transpose(1, 2)
-    return attn_output, attn_weights
-
-
-def xattention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    **kwargs,
-):
-    if query.shape[-2] == 1:
-        raise NotImplementedError("Sparse Attention is not supported on decoding")
-    
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
-    attn_output, attn_weights = xattention_kernel(query, key_states, value_states, attention_mask)
-
-    module.config._attn_implementation = "eager" # Apply Sparse Attention only for prefill stage (single forward), dense on decoding
-    return attn_output, attn_weights
-
-
-def tri_shape_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    **kwargs,
-):
-    if query.shape[-2] == 1:
-        raise NotImplementedError("Sparse Attention is not supported on decoding")
-    
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
-    attn_output, attn_weights = tri_shape_kernel(query, key_states, value_states, attention_mask)
-
-    module.config._attn_implementation = "eager" # Apply Sparse Attention only for prefill stage (single forward), dense on decoding
-    return attn_output, attn_weights
