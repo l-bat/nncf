@@ -422,17 +422,10 @@ if __name__ == "__main__":
 
     max_new_tokens = dataset2maxlen[args.subset]
     answers = []
-    max_length = 10000
-    with compress(model) if args.enable_eviction else torch.no_grad():
+    max_length = 8192
+    with torch.no_grad():
         for p_idx, data_sample in enumerate(tqdm(data)):
             prompt = preprocess_prompt(data_sample, args.subset)
-            messages = [{"role": "user", "content": prompt}]
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-
             inputs = tokenizer([prompt], truncation=False, return_tensors="pt").to(model.device)
             if len(inputs.input_ids[0]) > max_length:
                 half = int(max_length / 2)
@@ -442,7 +435,8 @@ if __name__ == "__main__":
                 inputs = tokenizer([prompt], truncation=False, return_tensors="pt").to(model.device)
 
             context_length = inputs.input_ids.shape[-1]
-            with torch.inference_mode():
+            from contextlib import nullcontext
+            with compress(model) if args.enable_eviction else nullcontext():
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
