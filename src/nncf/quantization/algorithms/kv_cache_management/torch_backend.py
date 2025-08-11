@@ -40,6 +40,7 @@ class KVCacheCompressor:
         self.group_size = eviction_parameters.group_size if self.strategy == "per_group" else 1
         self.apply_rerotation = eviction_parameters.apply_rerotation
         self.kvcrush_anchor = eviction_parameters.kvcrush_anchor
+        # self.mix_lambda = 0.1
         self._validate_arguments()
 
         self._scores = []
@@ -180,6 +181,66 @@ class KVCacheCompressor:
             return self._scores[layer_idx]
         else:
             return self._scores[layer_idx] / self._cache_counter[layer_idx]
+
+    def _calculate_similarity(
+        self,
+        key_states,
+        threshold=0.5,
+        retain_ratio=0.2,
+        retain_direction="last",
+    ):
+        k = key_states[0]
+        num_heads = k.shape[0]
+
+        k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
+        similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2))
+
+        for h in range(num_heads):
+            similarity_cos[h].fill_diagonal_(0.0)
+
+        # shape: [num_heads, seq_len, seq_len]
+        similarity_mask = similarity_cos > threshold
+
+        seq_len = similarity_mask.size(-1)
+        # k = int(seq_len * retain_ratio)
+        k = self.intermediate_size
+
+        indices = torch.where(
+            similarity_mask,
+            torch.arange(similarity_mask.size(-1), device=similarity_mask.device),
+            torch.zeros_like(similarity_mask, dtype=torch.long),
+        )
+
+        # find the last True index in each row
+        if retain_direction == "last":
+            similarity_retain = torch.max(indices, dim=-1)[0]
+
+        # find the first True index in each row
+        elif retain_direction == "first":
+            similarity_retain = torch.min(indices, dim=-1)[0]
+
+        # keep the last_percent% elements
+        elif retain_direction == "last_percent":
+            similarity_retain = torch.topk(indices, k=k, dim=-1)[0][:, :, 0]
+
+        # keep the first_percent% elements
+        elif retain_direction == "first_percent":
+            similarity_retain = torch.topk(indices, k=k, dim=-1, largest=False)[0][:, :, -1]
+
+        # create indices for zeroing
+        batch_idx = (
+            torch.arange(num_heads).unsqueeze(1).repeat(1, similarity_retain.size(1))
+        )
+        seq_idx = torch.arange(similarity_retain.size(1)).unsqueeze(0).repeat(num_heads, 1)
+
+        # zero the specified positions in similarity_cos
+        similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
+
+        similarity_cos = similarity_cos.mean(dim=1).softmax(dim=-1)
+
+        # mean across heads
+        similarity_cos = similarity_cos.mean(dim=0, keepdims=True)[:, self.start_size:]
+        return similarity_cos
 
     def get_intermediate_page_scores(self):
         scores = self.get_scores()
@@ -452,6 +513,7 @@ class KVCacheCompressor:
         rotated_key_states = key_states * rerotation_cos.unsqueeze(1) + rotate_half(key_states) * rerotation_sin.unsqueeze(1)
         return rotated_key_states.to(dtype)
 
+    @torch.no_grad
     def compress(
         self,
         layer_idx: int,
@@ -484,6 +546,14 @@ class KVCacheCompressor:
         """
         # Compute scores
         scores = self.get_scores(layer_idx)
+        # if self.mix_lambda != 1:
+        #     similarity_cos = self._calculate_similarity(
+        #         keys,
+        #         # retain_ratio=self.retain_ratio,
+        #         # retain_direction=self.retain_direction,
+        #     )
+        #     scores = scores * self.mix_lambda - similarity_cos * (1 - self.mix_lambda)
+
         indices = self.get_remaining_indices(scores, kwargs)
 
         # Prune keys and values
@@ -508,6 +578,7 @@ class KVCacheCompressor:
 
         return keys, values
 
+    @torch.no_grad
     def forward_hook(self, module: nn.Module, input: list[torch.Tensor], kwargs: dict, output: list):
         """
         Default forward hook called after the forward pass of an attention layer.
@@ -542,6 +613,10 @@ class KVCacheCompressor:
         # TODO: Support chunked prefill (prev_attn_weights.shape[-2] == 1 and current_attn_weights.shape[-2] != 1)
         if layer_idx == 0 and attn_weights.shape[-2] != 1:
             self.clean()
+            # self.mix_lambda = 1
+
+        # if layer_idx == 0 and attn_weights.shape[-2] == 1:
+        #     self.mix_lambda = 0.1
 
         self._update_scores(layer_idx, attn_weights)
 
