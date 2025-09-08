@@ -9,6 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import gc
+import os
 import re
 import string
 from argparse import ArgumentParser
@@ -19,8 +20,8 @@ import torch
 import transformers
 from rouge import Rouge
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM
 from transformers import AutoConfig
+from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 from transformers import BitsAndBytesConfig
 
@@ -29,13 +30,13 @@ from nncf.quantization.advanced_parameters import KVCacheCompressionParameters
 from nncf.quantization.advanced_parameters import KVCacheRefinedSelection
 from nncf.quantization.algorithms.kv_cache_management.torch_backend import KVCacheCompressor
 
+os.environ["HF_TOKEN"] = ""
 
-import os
-os.environ['HF_TOKEN'] = ""
-
+# (Phi3 and DeepSeek issue)
 # AttributeError: 'DynamicCache' object has no attribute 'get_max_length'. Did you mean: 'get_seq_length'?
-# The method get_max_length of 'DynamicCache' is deprecated and has been removed in transformer 4.49 (Phi3 and DeepSeek issue)
+# The method get_max_length of 'DynamicCache' is deprecated and has been removed in transformer 4.49
 # fix: https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/commit/faea2faa9ec002397d20e90dae777c4252022f3a
+
 
 def normalize_answer(s):
     """Lower text and remove punctuation, articles and extra whitespace."""
@@ -354,33 +355,43 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True, help="Model name")
 
     parser.add_argument("--enable_eviction", action="store_true")
-    parser.add_argument("--algorithm", default="snapkv", choices=["snapkv", "h2o"])
+    parser.add_argument("--algorithm", default="snapkv", choices=["snapkv", "h2o", "rkv"])
     parser.add_argument("--strategy", default="per_group", choices=["per_token", "per_group"])
-    parser.add_argument("--refined_algorithm", default=None, choices=["criticalkv", "kvcrush"])
+    parser.add_argument("--refined_algorithm", default=None, choices=["criticalkv", "kvcrush", "diversekv"])
     parser.add_argument("--intermediate_size", type=int, default=2048)
     parser.add_argument("--recent_size", type=int, default=128)
     parser.add_argument("--start_size", type=int, default=32)
     parser.add_argument("--refined_size", type=int, default=0)
-    parser.add_argument("--anchor", type=str, default="alternate", choices=["alternate", "mean", "zeros", "ones", "random"])
+    parser.add_argument(
+        "--anchor", type=str, default="alternate", choices=["alternate", "mean", "zeros", "ones", "random"]
+    )
     parser.add_argument("--score_aggregation", type=str, default="sum", choices=["sum", "norm_sum"])
     parser.add_argument("--group_size", type=int, default=32)
     parser.add_argument("--window_size", type=int, default=None)
+    parser.add_argument("--mix_lambda", type=float, default=1.0)
     parser.add_argument("--apply_rerotation", action="store_true")
     parser.add_argument("--prefill_impl", default="dense", choices=["dense", "tri-shape", "x-attention"])
 
     args = parser.parse_args()
 
     if args.enable_eviction:
-        algorthm = KVCacheCompressionMode.SNAPKV if args.algorithm == "snapkv" else KVCacheCompressionMode.H2O
+        if args.algorithm == "snapkv":
+            algorithm = KVCacheCompressionMode.SNAPKV
+        elif args.algorithm == "rkv":
+            algorithm = KVCacheCompressionMode.RKV
+        else:
+            algorithm = KVCacheCompressionMode.H2O
         refined_algorithm = None
         if args.refined_algorithm is not None:
-            refined_algorithm = (
-                KVCacheRefinedSelection.CRITICALKV
-                if args.refined_algorithm == "criticalkv"
-                else KVCacheRefinedSelection.KVCRUSH
-            )
+            if args.refined_algorithm == "criticalkv":
+                refined_algorithm = KVCacheRefinedSelection.CRITICALKV
+            elif args.refined_algorithm == "diversekv":
+                refined_algorithm = KVCacheRefinedSelection.DIVERSEKV
+            else:
+                refined_algorithm = KVCacheRefinedSelection.KVCRUSH
+
         eviction_parameters = KVCacheCompressionParameters(
-            algorithm=algorthm,
+            algorithm=algorithm,
             window_size=args.window_size,
             strategy=args.strategy,
             group_size=args.group_size,
@@ -391,6 +402,7 @@ if __name__ == "__main__":
             apply_rerotation=args.apply_rerotation,
             refined_size=args.refined_size,
             refined_algorithm=refined_algorithm,
+            mix_lambda=args.mix_lambda,
             prefill_impl=args.prefill_impl,
         )
         compress = KVCacheCompressor(eviction_parameters=eviction_parameters)
@@ -403,26 +415,28 @@ if __name__ == "__main__":
         bnb_4bit_compute_dtype=torch.float16,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, token=os.environ['HF_TOKEN'])
-    config = AutoConfig.from_pretrained(args.model, trust_remote_code=True, attn_implementation="eager", output_attentions=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, token=os.environ["HF_TOKEN"])
+    config = AutoConfig.from_pretrained(
+        args.model, trust_remote_code=True, attn_implementation="eager", output_attentions=True
+    )
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         config=config,
-        attn_implementation="eager",
+        # attn_implementation="eager",
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         # quantization_config=quantization_config,
-        token=os.environ['HF_TOKEN'],
+        token=os.environ["HF_TOKEN"],
     )
-    model.generation_config.temperature=None
-    model.generation_config.top_p=None
-    model.generation_config.top_k=None
-    model = model.eval()
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
+    model.generation_config.top_k = None
+    model.eval()
 
     max_new_tokens = dataset2maxlen[args.subset]
     answers = []
-    max_length = 8192
+    max_length = 4500
     with torch.no_grad():
         for p_idx, data_sample in enumerate(tqdm(data)):
             prompt = preprocess_prompt(data_sample, args.subset)
@@ -436,6 +450,7 @@ if __name__ == "__main__":
 
             context_length = inputs.input_ids.shape[-1]
             from contextlib import nullcontext
+
             with compress(model) if args.enable_eviction else nullcontext():
                 outputs = model.generate(
                     **inputs,
@@ -457,7 +472,7 @@ if __name__ == "__main__":
             )
             del inputs, outputs
             torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()   # returns unused segments to the driver
+            torch.cuda.ipc_collect()  # returns unused segments to the driver
             gc.collect()
 
     score = evaluate(answers, args.subset)

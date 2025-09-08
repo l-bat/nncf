@@ -14,22 +14,23 @@ import torch.nn.functional as F
 
 
 def get_visual_similarity(image_features):
-    image_features = image_features.float() # (B, N, D)
-    image_normalized = image_features / image_features.norm(dim=-1, keepdim=True) # (B, N, D)
-    similarity = torch.matmul(image_normalized, image_normalized.transpose(1, 2)) # (B, N, N)
+    image_features = image_features.float()  # (B, N, D)
+    image_normalized = image_features / image_features.norm(dim=-1, keepdim=True)  # (B, N, D)
+    similarity = torch.matmul(image_normalized, image_normalized.transpose(1, 2))  # (B, N, N)
     return similarity
 
 
 def get_relevance_score(image_embeds, text_embeds):
     image_embeds = image_embeds.float()
     text_embeds = text_embeds.float()
-    image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True) # (B, N, C)
-    text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True) # (M, C)
+    image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)  # (B, N, C)
+    text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)  # (M, C)
 
-    relevance = torch.matmul(image_embeds, text_embeds.t()) # (B, N, M)
-    relevance = (-relevance).mean(dim=-1) # (B, N)
-    relevance = (relevance - relevance.min(dim=1, keepdim=True)[0]) / \
-                (relevance.max(dim=1, keepdim=True)[0] - relevance.min(dim=1, keepdim=True)[0] + 1e-6)
+    relevance = torch.matmul(image_embeds, text_embeds.t())  # (B, N, M)
+    relevance = (-relevance).mean(dim=-1)  # (B, N)
+    relevance = (relevance - relevance.min(dim=1, keepdim=True)[0]) / (
+        relevance.max(dim=1, keepdim=True)[0] - relevance.min(dim=1, keepdim=True)[0] + 1e-6
+    )
     return relevance
 
 
@@ -37,9 +38,9 @@ def build_conditional_kernel_matrix(relevance, similarity, theta=1):
     if theta != 1:
         # theta = 0.5
         alpha = theta / (2 * (1 - theta))
-        relevance = torch.exp(alpha * relevance) # (B, N)
-    
-    kernel = relevance.unsqueeze(2) * similarity * relevance.unsqueeze(1) # (B, N, N)
+        relevance = torch.exp(alpha * relevance)  # (B, N)
+
+    kernel = relevance.unsqueeze(2) * similarity * relevance.unsqueeze(1)  # (B, N, N)
     return kernel
 
 
@@ -51,8 +52,8 @@ def conditional_dpp_map(kernel, num_keep_tokens):
 
     # orthogonal directions corresponding to selected tokens (L~=CC^T)
     B, N = di2s.shape
-    cis = torch.zeros((num_keep_tokens, B, N), device=device) # (num_keep_tokens, B, N)
-    
+    cis = torch.zeros((num_keep_tokens, B, N), device=device)  # (num_keep_tokens, B, N)
+
     keep_indices = torch.empty((num_keep_tokens, B), dtype=torch.long, device=device)
     batch_idx = torch.arange(B)
     for i in range(num_keep_tokens):
@@ -67,10 +68,10 @@ def conditional_dpp_map(kernel, num_keep_tokens):
             eis = (kernel[batch_idx, j] - proj) / torch.sqrt(di2s[batch_idx, j].unsqueeze(-1) + 1e-5)
 
         cis[i, :, :] = eis
-        di2s -= eis ** 2
-        di2s[batch_idx, j] = -float('inf')
+        di2s -= eis**2
+        di2s[batch_idx, j] = -float("inf")
 
-    keep_indices = torch.sort(keep_indices.t()).values 
+    keep_indices = torch.sort(keep_indices.t()).values
     return keep_indices
 
 
@@ -99,7 +100,7 @@ def get_input_embeds(model, inputs):
     )
     special_image_mask = special_image_mask.all(-1)
     exp_special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-    
+
     image_embeds = model.get_image_features(
         pixel_values=inputs.pixel_values.to(cpu_device),
         **kwargs,
@@ -117,6 +118,7 @@ def get_image_features(model, inputs, **kwargs):
     image_num_patches = None
     if "LlavaNextForConditionalGeneration" in model.config.architectures and pixel_values.dim() == 5:
         from transformers.models.llava_next.modeling_llava_next import image_size_to_num_patches
+
         image_num_patches = [
             image_size_to_num_patches(
                 image_size=imsize,
@@ -129,35 +131,39 @@ def get_image_features(model, inputs, **kwargs):
         _pixel_values_list = [pix_val[:num_patch] for pix_val, num_patch in zip(pixel_values, image_num_patches)]
         pixel_values = torch.cat(_pixel_values_list, dim=0)
 
-    if hasattr(model, "vision_tower"): # llava or internvl
+    if hasattr(model, "vision_tower"):  # llava or internvl
         vision_feature_layer = kwargs.get("vision_feature_layer", -1)
-        image_features = model.vision_tower(pixel_values=pixel_values, output_hidden_states=True) #.last_hidden_state
+        image_features = model.vision_tower(pixel_values=pixel_values, output_hidden_states=True)  # .last_hidden_state
         image_features = image_features.hidden_states[vision_feature_layer]
 
-        if kwargs.get("vision_feature_select_strategy", None) == "default":
-            image_features = image_features[:, 1:] # remove CLS token
-        if image_num_patches is None: # LlavaForConditionalGeneration
+        if kwargs.get("vision_feature_select_strategy") == "default":
+            image_features = image_features[:, 1:]  # remove CLS token
+        if image_num_patches is None:  # LlavaForConditionalGeneration
             image_num_patches = image_features.shape[0]
-    elif hasattr(model, "visual") or hasattr(model, "vision_tower"): # qwen
+    elif hasattr(model, "visual") or hasattr(model, "vision_tower"):  # qwen
         image_features = model.visual.patch_embed(pixel_values)
         image_num_patches = (kwargs["image_grid_thw"].prod(-1)).tolist()
-    elif hasattr(model, "vision_model"):
-        raise ""
     else:
-        raise NotImplementedError("Unsupported visual model")
+        error_msg = "Unsupported visual model"
+        raise NotImplementedError(error_msg)
 
     image_features = torch.split(image_features, image_num_patches, dim=0)
 
     if "LlavaNextForConditionalGeneration" in model.config.architectures:
         embed_std = 1 / np.sqrt(model.config.text_config.hidden_size)
-        image_newline = torch.Tensor(torch.randn(image_features[0].shape[-1], dtype=image_features[0].dtype) * embed_std).to(model.device)
+        image_newline = torch.Tensor(
+            torch.randn(image_features[0].shape[-1], dtype=image_features[0].dtype) * embed_std
+        ).to(model.device)
         image_features, _ = model.pack_image_features(
             image_features,
             inputs.image_sizes,
-            vision_feature_select_strategy=kwargs.get("vision_feature_select_strategy", None),
+            vision_feature_select_strategy=kwargs.get("vision_feature_select_strategy"),
             image_newline=image_newline,
         )
-    elif "Qwen2_5_VLForConditionalGeneration" in model.config.architectures or "Qwen2VLForConditionalGeneration" in model.config.architectures:
+    elif (
+        "Qwen2_5_VLForConditionalGeneration" in model.config.architectures
+        or "Qwen2VLForConditionalGeneration" in model.config.architectures
+    ):
         spatial_merge_size = model.visual.config.spatial_merge_size
         pooled_image_features = []
         for img_feat, (t, h, w) in zip(image_features, kwargs["image_grid_thw"]):
@@ -193,7 +199,7 @@ def get_pruned_input_embeds(model, inputs, num_keep_tokens):
     assert B == 1
     special_image_mask = inputs_embeds == model.get_input_embeddings()(
         torch.tensor(model.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
-    ) # (B, seq_len, emb_dim)
+    )  # (B, seq_len, emb_dim)
     special_image_mask = special_image_mask.all(-1)
 
     text_embeds = inputs_embeds[~special_image_mask].view(-1, emb_dim)
@@ -218,7 +224,7 @@ def get_pruned_input_embeds(model, inputs, num_keep_tokens):
         offset += emb_i.shape[0]
 
     # Flatten kept token indices
-    keep_indices = torch.cat(keep_indices, dim=0)    
+    keep_indices = torch.cat(keep_indices, dim=0)
 
     image_token_positions = torch.nonzero(special_image_mask[0], as_tuple=False).squeeze(1)  # shape [n_image_tokens]
     kept_positions = image_token_positions[keep_indices]  # shape [len(flattened_indices)]

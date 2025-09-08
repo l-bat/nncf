@@ -85,6 +85,8 @@ class KVCacheCompressionMode(StrEnum):
 
     H2O = "H2O"
     SNAPKV = "SnapKV"
+    RKV = "RKV"
+    RPC = "RPC"
 
 
 @api()
@@ -92,12 +94,14 @@ class KVCacheRefinedSelection(StrEnum):
     """
     Defines KV Cache refined selection algorithms.
 
-    :param KVCrush: KVCrush algorithm.
-    :param CriticalKV: CriticalKV algorithm.
+    :param KVCRUSH: KVCrush algorithm.
+    :param CRITICALKV: CriticalKV algorithm.
+    :param DIVERSEKV: DiverseKV algorithm.
     """
 
     KVCRUSH = "KVCrush"
     CRITICALKV = "CriticalKV"
+    DIVERSEKV = "DiverseKV"
 
 
 @api()
@@ -514,6 +518,11 @@ class KVCacheCompressionParameters:
         which can be "alternate", "random", "zeros", "ones", or "mean". Defaults to "alternate".
         This parameter is relevant only if `refined_algorithm` is set to KVCrush.
     :type kvcrush_anchor: str
+    :param mix_lambda: The lambda parameter for the R-KV algorithm, which controls the the trade-off
+        between prioritizing important tokens and reducing redundant tokens.
+        λ = 0 - prioritizes removing redundant tokens, λ = 1 - prioritizes retaining important tokens.
+        Defaults to 0.5. This parameter is relevant only if `algorithm` is set to RKV.
+    :type mix_lambda: float
     :param prefill_impl: The attention implementation during prefill stage.
     :type prefill_impl: KVCacheCompressionMode
     """
@@ -530,6 +539,7 @@ class KVCacheCompressionParameters:
     window_size: Optional[int] = None
     refined_algorithm: KVCacheRefinedSelection = KVCacheRefinedSelection.KVCRUSH
     kvcrush_anchor: str = "alternate"
+    mix_lambda: float = 0.1
     prefill_impl: KVCachePrefillMode = KVCachePrefillMode.DENSE
 
 
