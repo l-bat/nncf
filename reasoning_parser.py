@@ -8,150 +8,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
-import os
-import random
+import multiprocessing
+import queue
 import re
-from pathlib import Path
-from typing import Any, Iterable, Union
+from math import isclose
+from typing import Union
 
-import numpy as np
 import regex
 from latex2sympy2 import latex2sympy
+from sympy import N
+from sympy import simplify
+from sympy.parsing.latex import parse_latex
+from sympy.parsing.sympy_parser import parse_expr
 from word2number import w2n
-
-
-def set_seed(seed: int = 42) -> None:
-    np.random.seed(seed)
-    random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    print(f"Random seed set as {seed}")
-
-
-def load_jsonl(file: Union[str, Path]) -> Iterable[Any]:
-    with open(file, encoding="utf-8") as f:
-        for line in f:
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                print("Error in loading:", line)
-                exit()
-
-
-def save_jsonl(samples, save_path):
-    # ensure path
-    folder = os.path.dirname(save_path)
-    os.makedirs(folder, exist_ok=True)
-
-    with open(save_path, "w", encoding="utf-8") as f:
-        for sample in samples:
-            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-    print("Saved to", save_path)
-
-
-def lower_keys(example):
-    new_example = {}
-    for key, value in example.items():
-        if key != key.lower():
-            new_key = key.lower()
-            new_example[new_key] = value
-        else:
-            new_example[key] = value
-    return new_example
-
-
-PROMPT_TEMPLATES = {
-    "direct": ("Question: {input}\nAnswer: ", "{output}", "\n\n"),
-    "cot": ("Question: {input}\nAnswer: ", "{output}", "\n\n\n"),
-    "pal": ("Question: {input}\n\n", "{output}", "\n---\n"),
-    "tool-integrated": ("Question: {input}\n\nSolution:\n", "{output}", "\n---\n"),
-    "self-instruct": ("<|user|>\n{input}\n<|assistant|>\n", "{output}", "\n"),
-    "tora": ("<|user|>\n{input}\n<|assistant|>\n", "{output}", "\n"),
-    "wizard_zs": (
-        "### Instruction:\n{input}\n\n### Response: Let's think step by step.",
-        "{output}",
-        "\n\n\n",
-    ),
-    "platypus_fs": (
-        "### Instruction:\n{input}\n\n### Response:\n",
-        "{output}",
-        "\n\n\n",
-    ),
-    "deepseek-math": (
-        "User: {input}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
-        "\n\nAssistant: {output}",
-        "\n\n\n",
-    ),
-    "kpmath": (
-        "User: Please reason step by step and put your final answer at the end "
-        'with "The answer is: ".\n\n{input}\n\nAssistant:',
-        "{output}",
-    ),
-    "jiuzhang": (
-        "## Question\n{input}\n\n## Solution\n",
-        "{output}",
-        "\n\n\n",
-    ),
-    "jiuzhang_tora": (
-        "## Question\n{input}\n\n## Code Solution\n",
-        "{output}",
-        "\n\n\n",
-    ),
-    "jiuzhang_nl": (
-        "## Question\n{input}\n\n## Natural Language Solution\n",
-        "{output}",
-        "\n\n\n",
-    ),
-    "mmiqc": (
-        'Please solve the following problem and put your answer at the end with "The answer is: ".\n\n{input}\n\n',
-        "{output}",
-        "\n\n\n",
-    ),
-    "abel": (
-        "Question:\n{input}\nAnswer:\nLet's think step by step.\n",
-        "{output}",
-        "\n\n",
-    ),
-    "shepherd": ("{input}\n", "{output}", "\n\n\n"),
-    "qwen-boxed": (
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        "<|im_start|>user\n{input}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
-        "<|im_end|>\n<|im_start|>assistant\n",
-        "{output}",
-        "\n\n",
-    ),
-    "qwen25-math-cot": (
-        "<|im_start|>system\nPlease reason step by step, and put your final answer within \\boxed{{}}.<|im_end|>\n"
-        "<|im_start|>user\n{input}<|im_end|>\n"
-        "<|im_start|>assistant\n",
-        "{output}",
-        "\n\n",
-    ),
-    "mathstral": (
-        "{input}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
-        "{output}",
-        "\n\n",
-    ),
-    "internlm-math-fs": ("Question:{input}\nAnswer:", "{output}", "\n"),
-    "internlm-math-chat": (
-        "<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n",
-        "{output}",
-        "\n\n",
-    ),
-    "mistral": (
-        "[INST] {input}[/INST]",
-        "{output}",
-        "\n\n",
-    ),
-    "numina": ("### Problem: {input}\n### Solution:", " {output}", "\n\n"),
-}
-
-key_map = {
-    "gt": "Ground Truth",
-    "pred": "Prediction",
-    "gt_cot": "Reference CoT",
-    "score": "Score",
-}
 
 
 def _fix_fracs(string):
@@ -490,17 +359,6 @@ def strip_string(string, skip_unit=False):
     return string
 
 
-def extract_multi_choice_answer(pred_str):
-    # TODO: SFT models
-    if "Problem:" in pred_str:
-        pred_str = pred_str.split("Problem:", 1)[0]
-    pred_str = pred_str.replace("choice is", "answer is")
-    patt = regex.search(r"answer is \(?(?P<ans>[abcde])\)?", pred_str.lower())
-    if patt is not None:
-        return patt.group("ans").upper()
-    return "placeholder"
-
-
 direct_answer_trigger_for_fewshot = ("choice is", "answer is")
 
 
@@ -544,87 +402,6 @@ def choice_answer_clean(pred: str):
 
     # Remove the period at the end, again!
     pred = pred.rstrip(".").rstrip("/")
-
-    return pred
-
-
-def find_box(pred_str: str):
-    ans = pred_str.split("boxed")[-1]
-    if not ans:
-        return ""
-    if ans[0] == "{":
-        stack = 1
-        a = ""
-        for c in ans[1:]:
-            if c == "{":
-                stack += 1
-                a += c
-            elif c == "}":
-                stack -= 1
-                if stack == 0:
-                    break
-                a += c
-            else:
-                a += c
-    else:
-        a = ans.split("$")[0].strip()
-    return a
-
-
-def clean_units(pred_str: str):
-    """Clean the units in the number."""
-
-    def convert_pi_to_number(code_string):
-        code_string = code_string.replace("\\pi", "π")
-        # Replace \pi or π not preceded by a digit or } with 3.14
-        code_string = re.sub(r"(?<![\d}])\\?π", "3.14", code_string)
-        # Replace instances where π is preceded by a digit but without a multiplication symbol, e.g., "3π" -> "3*3.14"
-        code_string = re.sub(r"(\d)(\\?π)", r"\1*3.14", code_string)
-        # Handle cases where π is within braces or followed by a multiplication symbol
-        # This replaces "{π}" with "3.14" directly and "3*π" with "3*3.14"
-        code_string = re.sub(r"\{(\\?π)\}", "3.14", code_string)
-        code_string = re.sub(r"\*(\\?π)", "*3.14", code_string)
-        return code_string
-
-    pred_str = convert_pi_to_number(pred_str)
-    pred_str = pred_str.replace("%", "/100")
-    pred_str = pred_str.replace("$", "")
-    pred_str = pred_str.replace("¥", "")
-    pred_str = pred_str.replace("°C", "")
-    pred_str = pred_str.replace(" C", "")
-    pred_str = pred_str.replace("°", "")
-    return pred_str
-
-
-def extract_theoremqa_answer(pred: str, answer_flag: bool = True):
-    if any([option in pred.lower() for option in ["yes", "true"]]):
-        pred = "True"
-    elif any([option in pred.lower() for option in ["no", "false"]]):
-        pred = "False"
-    elif any([option in pred.lower() for option in ["(a)", "(b)", "(c)", "(d)", "(e)", "(f)"]]):
-        pass
-    else:
-        # Some of the models somehow get used to boxed output from pre-training
-        if "boxed" in pred:
-            pred = find_box(pred)
-
-        if answer_flag:
-            # Extract the numbers out of the string
-            pred = pred.split("=")[-1].strip()
-            pred = clean_units(pred)
-            try:
-                tmp = str(latex2sympy(pred))
-                pred = str(eval(tmp))
-            except Exception:
-                if re.match(r"-?[\d\.]+\s\D+$", pred) or re.match(r"-?[\d\.]+\s[^\s]+$", pred):
-                    pred = pred.split(" ")[0]
-        else:
-            # desparate search over the last number
-            preds = re.findall(r"-?\d*\.?\d+", pred)
-            if len(preds) >= 1:
-                pred = preds[-1]
-            else:
-                pred = ""
 
     return pred
 
@@ -785,72 +562,324 @@ def parse_ground_truth(example, data_name):
     return gt_cot, gt_ans
 
 
-def parse_question(example, data_name):
-    question = ""
-    if data_name == "asdiv":
-        question = f"{example['body'].strip()} {example['question'].strip()}"
-    elif data_name == "svamp":
-        body = example["Body"].strip()
-        if not body.endswith("."):
-            body = body + "."
-        question = f"{body} {example['Question'].strip()}"
-    elif data_name == "tabmwp":
-        title_str = f'regarding "{example["table_title"]}" ' if example["table_title"] else ""
-        question = f"Read the following table {title_str}and answer a question:\n"
-        question += f"{example['table']}\n{example['question']}"
-        if example["choices"]:
-            question += f" Please select from the following options: {example['choices']}"
-    elif data_name == "carp_en":
-        question = example["content"]
-    elif data_name == "mmlu_stem":
-        options = example["choices"]
-        assert len(options) == 4
-        for i, (label, option) in enumerate(zip("ABCD", options)):
-            options[i] = f"({label}) {str(option).strip()}"
-        options = " ".join(options)
-        question = f"{example['question'].strip()}\nAnswer Choices: {options}"
-    elif data_name == "sat_math":
-        options = example["options"].strip()
-        assert options[0] == "A"
-        options = "(" + options
-        for ch in "BCD":
-            if f" {ch}) " in options:
-                options = regex.sub(f" {ch}\) ", f" ({ch}) ", options)
-        question = f"{example['question'].strip()}\nAnswer Choices: {options}"
-    elif "aqua" in data_name:
-        options = example["options"]
-        choice = "(" + "(".join(options)
-        choice = choice.replace("(", " (").replace(")", ") ").strip()
-        choice = "\nAnswer Choices: " + choice
-        question = example["question"].strip() + choice
-    elif data_name == "gaokao_math_qa":
-        options_dict = example["options"]
-        options = []
-        for key in options_dict:
-            options.append(f"({key}) {options_dict[key]}")
-        options = " ".join(options)
-        question = f"{example['question'].strip()}\n选项: {options}"
+# --------------Evaluation Utils-----------------
+
+
+def postprocess_choice_answer(pred: str):
+    pred = pred.strip("\n").rstrip(".").rstrip("/").strip(" ").lstrip(":")
+    # Clean the answer based on the dataset
+    tmp = re.findall(r"\b(A|B|C|D|E)\b", pred.upper())
+    if tmp:
+        pred = tmp
     else:
-        for key in ["question", "problem", "Question", "input"]:
-            if key in example:
-                question = example[key]
-                break
-    # assert question != ""
-    # Yes or No question
-    _, gt_ans = parse_ground_truth(example, data_name)
-    if isinstance(gt_ans, str):
-        gt_lower = gt_ans.lower()
-        if gt_lower in ["true", "false"]:
-            question += " (True or False)"
-        if gt_lower in ["yes", "no"]:
-            question += " (Yes or No)"
-    return question.strip()
+        pred = [pred.strip().strip(".")]
+    pred = pred[-1]
+    # Remove the period at the end, again!
+    pred = pred.rstrip(".").rstrip("/")
+    return pred
 
 
-def run_execute(executor, result, prompt_type, data_name, execute=False):
-    if not result or result == "error":
-        return None, None
-    report = None
-    prediction = extract_answer(result, data_name)
-    prediction = strip_string(prediction, skip_unit=data_name in STRIP_EXCEPTIONS)
-    return prediction, report
+def parse_digits(num):
+    num = regex.sub(",", "", str(num))
+    try:
+        return float(num)
+    except ValueError:
+        if num.endswith("%"):
+            num = num[:-1]
+            if num.endswith("\\"):
+                num = num[:-1]
+            try:
+                return float(num) / 100
+            except ValueError:
+                pass
+    return None
+
+
+def is_digit(num):
+    # paired with parse_digits
+    return parse_digits(num) is not None
+
+
+def str_to_pmatrix(input_str):
+    input_str = input_str.strip()
+    matrix_str = re.findall(r"\{.*,.*\}", input_str)
+    pmatrix_list = []
+
+    for m in matrix_str:
+        m = m.strip("{}")
+        pmatrix = r"\begin{pmatrix}" + m.replace(",", "\\") + r"\end{pmatrix}"
+        pmatrix_list.append(pmatrix)
+
+    return ", ".join(pmatrix_list)
+
+
+def math_equal(
+    prediction: Union[bool, float, str],
+    reference: Union[float, str],
+    include_percentage: bool = True,
+    is_close: bool = True,
+    timeout: bool = False,
+) -> bool:
+    """
+    Exact match of math if and only if:
+    1. numerical equal: both can convert to float and are equal
+    2. symbolic equal: both can convert to sympy expression and are equal
+    """
+    # print("Judge:", prediction, reference)
+    if prediction is None or reference is None:
+        return False
+    if str(prediction.strip().lower()) == str(reference.strip().lower()):
+        return True
+    if reference in ["A", "B", "C", "D", "E"] and postprocess_choice_answer(prediction) == reference:
+        return True
+
+    try:  # 1. numerical equal
+        if is_digit(prediction) and is_digit(reference):
+            prediction = parse_digits(prediction)
+            reference = parse_digits(reference)
+            # number questions
+            if include_percentage:
+                gt_result = [reference / 100, reference, reference * 100]
+            else:
+                gt_result = [reference]
+            for item in gt_result:
+                try:
+                    if is_close:
+                        if numeric_equal(prediction, item):
+                            return True
+                    else:
+                        if item == prediction:
+                            return True
+                except Exception:
+                    continue
+            return False
+    except Exception:
+        pass
+
+    if not prediction and prediction not in [0, False]:
+        return False
+
+    # 2. symbolic equal
+    reference = str(reference).strip()
+    prediction = str(prediction).strip()
+
+    # pmatrix (amps)
+    if "pmatrix" in prediction and "pmatrix" not in reference:
+        reference = str_to_pmatrix(reference)
+
+    # deal with [], (), {}
+    pred_str, ref_str = prediction, reference
+    if (prediction.startswith("[") and prediction.endswith("]") and not reference.startswith("(")) or (
+        prediction.startswith("(") and prediction.endswith(")") and not reference.startswith("[")
+    ):
+        pred_str = pred_str.strip("[]()")
+        ref_str = ref_str.strip("[]()")
+    for s in ["{", "}", "(", ")"]:
+        ref_str = ref_str.replace(s, "")
+        pred_str = pred_str.replace(s, "")
+    if pred_str.lower() == ref_str.lower():
+        return True
+
+    # [a, b] vs. [c, d], return a==c and b==d
+    if (
+        regex.match(r"(\(|\[).+(\)|\])", prediction) is not None
+        and regex.match(r"(\(|\[).+(\)|\])", reference) is not None
+    ):
+        pred_parts = prediction[1:-1].split(",")
+        ref_parts = reference[1:-1].split(",")
+        if len(pred_parts) == len(ref_parts) and all(
+            [math_equal(pred_parts[i], ref_parts[i], include_percentage, is_close) for i in range(len(pred_parts))]
+        ):
+            return True
+    if (
+        (prediction.startswith("\\begin{pmatrix}") or prediction.startswith("\\begin{bmatrix}"))
+        and (prediction.endswith("\\end{pmatrix}") or prediction.endswith("\\end{bmatrix}"))
+        and (reference.startswith("\\begin{pmatrix}") or reference.startswith("\\begin{bmatrix}"))
+        and (reference.endswith("\\end{pmatrix}") or reference.endswith("\\end{bmatrix}"))
+    ):
+        pred_lines = [
+            line.strip()
+            for line in prediction[len("\\begin{pmatrix}") : -len("\\end{pmatrix}")].split("\\\\")
+            if line.strip()
+        ]
+        ref_lines = [
+            line.strip()
+            for line in reference[len("\\begin{pmatrix}") : -len("\\end{pmatrix}")].split("\\\\")
+            if line.strip()
+        ]
+        matched = True
+        if len(pred_lines) == len(ref_lines):
+            for pred_line, ref_line in zip(pred_lines, ref_lines):
+                pred_parts = pred_line.split("&")
+                ref_parts = ref_line.split("&")
+                if len(pred_parts) == len(ref_parts):
+                    if not all(
+                        [
+                            math_equal(
+                                pred_parts[i],
+                                ref_parts[i],
+                                include_percentage,
+                                is_close,
+                            )
+                            for i in range(len(pred_parts))
+                        ]
+                    ):
+                        matched = False
+                        break
+                else:
+                    matched = False
+                if not matched:
+                    break
+        else:
+            matched = False
+        if matched:
+            return True
+
+    if prediction.count("=") == 1 and reference.count("=") == 1:
+        pred = prediction.split("=")
+        pred = f"{pred[0].strip()} - ({pred[1].strip()})"
+        ref = reference.split("=")
+        ref = f"{ref[0].strip()} - ({ref[1].strip()})"
+        if symbolic_equal(pred, ref) or symbolic_equal(f"-({pred})", ref):
+            return True
+    elif prediction.count("=") == 1 and len(prediction.split("=")[0].strip()) <= 2 and "=" not in reference:
+        if math_equal(prediction.split("=")[1], reference, include_percentage, is_close):
+            return True
+    elif reference.count("=") == 1 and len(reference.split("=")[0].strip()) <= 2 and "=" not in prediction:
+        if math_equal(prediction, reference.split("=")[1], include_percentage, is_close):
+            return True
+
+    # symbolic equal with sympy
+    if timeout:
+        if call_with_timeout(symbolic_equal_process, prediction, reference):
+            return True
+    else:
+        if symbolic_equal(prediction, reference):
+            return True
+
+    return False
+
+
+def numeric_equal(prediction: float, reference: float):
+    # Note that relative tolerance has significant impact
+    # on the result of the synthesized GSM-Hard dataset
+    # if reference.is_integer():
+    #     return isclose(reference, round(prediction), abs_tol=1e-4)
+    # else:
+    # prediction = round(prediction, len(str(reference).split(".")[-1]))
+    return isclose(reference, prediction, rel_tol=1e-4)
+
+
+def symbolic_equal(a, b):
+    def _parse(s):
+        for f in [parse_latex, parse_expr, latex2sympy]:
+            try:
+                return f(s.replace("\\\\", "\\"))
+            except Exception:
+                try:
+                    return f(s)
+                except Exception:
+                    pass
+        return s
+
+    a = _parse(a)
+    b = _parse(b)
+
+    # direct equal
+    try:
+        if str(a) == str(b) or a == b:
+            return True
+    except Exception:
+        pass
+
+    # simplify equal
+    try:
+        if a.equals(b) or simplify(a - b) == 0:
+            return True
+    except Exception:
+        pass
+
+    # equation equal
+    try:
+        if (abs(a.lhs - a.rhs)).equals(abs(b.lhs - b.rhs)):
+            return True
+    except Exception:
+        pass
+
+    try:
+        if numeric_equal(float(N(a)), float(N(b))):
+            return True
+    except Exception:
+        pass
+
+    # matrix
+    try:
+        # if a and b are matrix
+        if a.shape == b.shape:
+            _a = a.applyfunc(lambda x: round(x, 3))
+            _b = b.applyfunc(lambda x: round(x, 3))
+            if _a.equals(_b):
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def symbolic_equal_process(a, b, output_queue):
+    result = symbolic_equal(a, b)
+    output_queue.put(result)
+
+
+def call_with_timeout(func, *args, timeout=1, **kwargs):
+    output_queue = multiprocessing.Queue()
+    process_args = args + (output_queue,)
+    process = multiprocessing.Process(target=func, args=process_args, kwargs=kwargs)
+    process.start()
+    process.join(timeout)
+
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        return False
+
+    return output_queue.get()
+
+
+def math_equal_with_timeout(pred, gt_ans, timeout):
+    def target(result_queue):
+        try:
+            result_queue.put(math_equal(pred, gt_ans))
+        except Exception as e:
+            result_queue.put(e)
+
+    result_queue = multiprocessing.Queue()
+    process = multiprocessing.Process(target=target, args=(result_queue,))
+    process.start()
+
+    process.join(timeout)
+
+    if process.is_alive():
+        print(f"Timeout occurred for prediction: {pred}")
+        process.terminate()
+        process.join()
+        return False
+
+    try:
+        result = result_queue.get_nowait()
+    except queue.Empty:
+        print("Result queue timed out")
+        return False
+
+    if isinstance(result, Exception):
+        print(f"Error occurred: {result}")
+        return False
+
+    return result
+
+
+def parallel_math_equal(all_pred, gt_ans, timeout=20):
+    results = []
+    for pred in all_pred:
+        results.append(math_equal_with_timeout(pred, gt_ans, timeout))
+    return results
