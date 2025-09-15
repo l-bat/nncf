@@ -1,30 +1,41 @@
+# Copyright (c) 2025 Intel Corporation
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#      http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import os
-from sklearn.metrics import accuracy_score, precision_score, recall_score, confusion_matrix
-
-
-import os
-import torch
 import string
-import numpy as np
-from tqdm import tqdm
-from datasets import load_dataset
-from transformers import AutoProcessor, set_seed
 from argparse import ArgumentParser
-from nncf.quantization.algorithms.kv_cache_management.visual_token_pruning import get_pruned_input_embeds, get_input_embeds
-from nncf.quantization.algorithms.kv_cache_management.sparse_prefill import SparsePrefill
+
+import torch
+from datasets import load_dataset
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import precision_score
+from sklearn.metrics import recall_score
+from tqdm import tqdm
+from transformers import AutoProcessor
+from transformers import set_seed
+
+from nncf.quantization.algorithms.kv_cache_management.visual_token_pruning import get_inputs_embeds
 
 
-class calculate_metrics:
-    def divide_chunks(self, l, n=2):
-        for i in range(0, len(l), n): 
-            yield l[i:i + n]
-        return 
+class MetricCalculator:
+    def divide_chunks(self, all_items, n=2):
+        for i in range(0, len(all_items), n):
+            yield all_items[i : i + n]
+        return
 
     def parse_pred_ans(self, pred_ans):
         pred_ans = pred_ans.lower()
         exclude = set(string.punctuation)
         pred_ans = "".join(ch for ch in pred_ans if ch not in exclude)
-        
+
         pred_label = None
         if pred_ans in ["yes", "no"]:
             pred_label = pred_ans
@@ -55,37 +66,51 @@ class calculate_metrics:
             clean_preds.append(pred)
 
         conf_mat = confusion_matrix(clean_gts, clean_preds, labels=[1, 0])
-        precision = precision_score(clean_gts, clean_preds, average='binary')
-        recall = recall_score(clean_gts, clean_preds, average='binary')
+        precision = precision_score(clean_gts, clean_preds, average="binary")
+        recall = recall_score(clean_gts, clean_preds, average="binary")
         tp, fn = conf_mat[0]
         fp, tn = conf_mat[1]
 
         return {
-            "TP": tp, "FN": fn, "TN": tn, "FP": fp,
-            "precision": precision, "recall": recall,
-            "other_num": other_num, "acc": acc,
+            "TP": tp,
+            "FN": fn,
+            "TN": tn,
+            "FP": fp,
+            "precision": precision,
+            "recall": recall,
+            "other_num": other_num,
+            "acc": acc,
         }
 
 
 def get_model_class(model_name):
     if "Qwen2.5-VL" in model_name:
         from transformers import Qwen2_5_VLForConditionalGeneration
+
         return Qwen2_5_VLForConditionalGeneration
     elif "Qwen2-VL" in model_name:
         from transformers import Qwen2VLForConditionalGeneration
+
         return Qwen2VLForConditionalGeneration
     elif "llava-1.5" in model_name:
         from transformers import LlavaForConditionalGeneration
+
         return LlavaForConditionalGeneration
     elif "llava-v1.6" in model_name:
         from transformers import LlavaNextForConditionalGeneration
+
         return LlavaNextForConditionalGeneration
     else:
-        raise ValueError(f"Unsupported model class for: {model_name}")
+        error_msg = f"Unsupported model class for: {model_name}"
+        raise ValueError(error_msg)
 
-def evaluate(model_name: str, category: str):
+
+def evaluate(args):
+    model_name = args.model
+    category = args.subset
     dataset = load_dataset("darkyarding/MME", split="test")
     dataset = dataset.filter(lambda x: x["category"] == category)
+    metric_util = MetricCalculator()
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
     model_cls = get_model_class(model_name)
@@ -101,9 +126,13 @@ def evaluate(model_name: str, category: str):
         top_k=None,
     ).eval()
 
-    sparse_prefill = SparsePrefill(algorithm="x-attention")
-
-    metric_util = calculate_metrics()
+    if args.enable_visual_pruning:
+        print(f"Enable visual token pruning with num_keep_tokens={args.num_keep_tokens}, theta={args.theta}")
+        num_keep_tokens = args.num_keep_tokens
+        theta = args.theta
+    else:
+        num_keep_tokens = None
+        theta = None
 
     all_items = []
     with torch.no_grad():
@@ -118,9 +147,7 @@ def evaluate(model_name: str, category: str):
                     "content": [{"type": "text", "text": prompt}, {"type": "image", "image": image}],
                 }
             ]
-            prompt = processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
 
             # from contextlib import nullcontext
@@ -132,25 +159,22 @@ def evaluate(model_name: str, category: str):
             #         do_sample=False,
             #     )
             #     generate_ids = generate_ids[:, inputs['input_ids'].shape[1]:]
-            
-            pruned_image_embeds = get_input_embeds(model, inputs)
-            # pruned_image_embeds = get_pruned_input_embeds(model, inputs, num_keep_tokens=128)
+
+            image_embeds = get_inputs_embeds(model, inputs, num_keep_tokens=num_keep_tokens, theta=theta)
             kwargs = {}
             if "image_sizes" in inputs:
                 kwargs["image_sizes"] = inputs.image_sizes
 
-            with sparse_prefill(model):
-                generate_ids = model.generate(
-                    inputs_embeds=pruned_image_embeds,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    **kwargs,
-                )
-            
+            # with sparse_prefill(model):
+            generate_ids = model.generate(
+                inputs_embeds=image_embeds,
+                max_new_tokens=512,
+                do_sample=False,
+                **kwargs,
+            )
+
             response = processor.batch_decode(
-                generate_ids,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False
+                generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )[0]
 
             pred_label = metric_util.parse_pred_ans(response)
@@ -186,13 +210,36 @@ def evaluate(model_name: str, category: str):
 if __name__ == "__main__":
     set_seed(42)
 
-    eval_type_dict = \
-        ["existence", "count", "position", "color", "posters", "celebrity", "scene", "landmark", "artwork", "OCR"] + \
-        ["commonsense_reasoning", "numerical_calculation", "text_translation", "code_reasoning"]
+    eval_type_dict = [
+        "existence",
+        "count",
+        "position",
+        "color",
+        "posters",
+        "celebrity",
+        "scene",
+        "landmark",
+        "artwork",
+        "OCR",
+    ] + ["commonsense_reasoning", "numerical_calculation", "text_translation", "code_reasoning"]
 
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, required=True, help="Huggingface model repo")
-    parser.add_argument("--subset", choices=eval_type_dict, required=True, help="MME category name (e.g., 'Counting')")
+    parser.add_argument("--subset", choices=eval_type_dict, required=True, help="MME category name")
+
+    parser.add_argument(
+        "--use_custom_prefill_attn", action="store_true", help="Enable custom attention kernel for prefill"
+    )
+    parser.add_argument("--prefill_impl", default="dense", choices=["dense", "tri-shape", "x-attention"])
+
+    parser.add_argument("--enable_visual_pruning", action="store_true", help="Enable visual token pruning")
+    parser.add_argument("--num_keep_tokens", type=int, default=128, help="Number of visual tokens to keep")
+    parser.add_argument(
+        "--theta",
+        type=float,
+        default=0.5,
+        help="Balance factor to control the trade-off between diversity and relevance",
+    )
     args = parser.parse_args()
 
-    evaluate(model_name=args.model, category=args.subset)
+    evaluate(args)

@@ -8,12 +8,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# This logic is largely copied from the https://github.com/Theia-4869/CDPruner/tree/main
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 
 def get_visual_similarity(image_features):
+    """
+    Compute the cosine similarity matrix among image features.
+    """
     image_features = image_features.float()  # (B, N, D)
     image_normalized = image_features / image_features.norm(dim=-1, keepdim=True)  # (B, N, D)
     similarity = torch.matmul(image_normalized, image_normalized.transpose(1, 2))  # (B, N, N)
@@ -21,6 +26,9 @@ def get_visual_similarity(image_features):
 
 
 def get_relevance_score(image_embeds, text_embeds):
+    """
+    Compute the relevance score between image and text embeddings.
+    """
     image_embeds = image_embeds.float()
     text_embeds = text_embeds.float()
     image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)  # (B, N, C)
@@ -34,9 +42,11 @@ def get_relevance_score(image_embeds, text_embeds):
     return relevance
 
 
-def build_conditional_kernel_matrix(relevance, similarity, theta=1):
+def build_conditional_kernel_matrix(relevance, similarity, theta=0.5):
+    """
+    Build the conditional DPP kernel matrix based on relevance and visual similarity.
+    """
     if theta != 1:
-        # theta = 0.5
         alpha = theta / (2 * (1 - theta))
         relevance = torch.exp(alpha * relevance)  # (B, N)
 
@@ -45,6 +55,9 @@ def build_conditional_kernel_matrix(relevance, similarity, theta=1):
 
 
 def conditional_dpp_map(kernel, num_keep_tokens):
+    """
+    Perform conditional DPP MAP inference to select a subset of tokens.
+    """
     device = kernel.device
 
     # kernel diagonal (di2s[b, i] = kernel[b, i, i] = relevance[b, i] ** 2 * (L[i,i]=1))
@@ -76,6 +89,9 @@ def conditional_dpp_map(kernel, num_keep_tokens):
 
 
 def get_model_kwargs(model, inputs):
+    """
+    Get the model keyword arguments from the model and inputs.
+    """
     kwargs = {}
     if hasattr(model.config, "vision_feature_select_strategy"):
         kwargs["vision_feature_select_strategy"] = model.config.vision_feature_select_strategy
@@ -88,32 +104,10 @@ def get_model_kwargs(model, inputs):
     return kwargs
 
 
-def get_input_embeds(model, inputs):
-    device = model.device
-    cpu_device = device
-    model.to(cpu_device)
-
-    kwargs = get_model_kwargs(model, inputs)
-    inputs_embeds = model.get_input_embeddings()(inputs.input_ids.to(cpu_device))
-    special_image_mask = inputs_embeds == model.get_input_embeddings()(
-        torch.tensor(model.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
-    )
-    special_image_mask = special_image_mask.all(-1)
-    exp_special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-
-    image_embeds = model.get_image_features(
-        pixel_values=inputs.pixel_values.to(cpu_device),
-        **kwargs,
-    )
-    flat_image_embeds = torch.cat(image_embeds, dim=0)
-    flat_image_embeds = flat_image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-    inputs_embeds = inputs_embeds.masked_scatter(exp_special_image_mask, flat_image_embeds)
-
-    model.to(device)
-    return inputs_embeds.to(device)
-
-
 def get_image_features(model, inputs, **kwargs):
+    """
+    Extract image features from the model.
+    """
     pixel_values = inputs.pixel_values
     image_num_patches = None
     if "LlavaNextForConditionalGeneration" in model.config.architectures and pixel_values.dim() == 5:
@@ -187,54 +181,67 @@ def get_image_features(model, inputs, **kwargs):
     return image_features
 
 
-def get_pruned_input_embeds(model, inputs, num_keep_tokens):
-    device = model.device
-    cpu_device = device
-    model.to(cpu_device)
+def get_cdpruner_mask(image_embeds, image_features, text_embeds, special_image_mask, num_keep_tokens, theta):
+    """
+    Generate a mask to retain image tokens based on fast MAP inference using Conditional DPP for token selection.
+    """
+    keep_indices = []
+    offset = 0
+    # Compute keep_indices for each image embedding
+    for emb_i, feat_i in zip(image_embeds, image_features):
+        rel_i = get_relevance_score(emb_i.unsqueeze(0), text_embeds)
+        sim_i = get_visual_similarity(feat_i)
+        kernel_i = build_conditional_kernel_matrix(rel_i, sim_i, theta)
+        keep_i = conditional_dpp_map(kernel_i, num_keep_tokens)[0] + offset
+        keep_indices.append(keep_i)
+        offset += emb_i.shape[0]
 
+    keep_indices = torch.cat(keep_indices, dim=0)
+
+    # Get the positions of the selected image tokens
+    image_token_positions = torch.nonzero(special_image_mask[0], as_tuple=False).squeeze(1)
+    kept_positions = image_token_positions[keep_indices]
+
+    # Build mask to keep: original text + selected image tokens
+    kept_mask = ~special_image_mask
+    kept_mask[0, kept_positions] = True
+
+    return kept_mask
+
+
+def get_inputs_embeds(model, inputs, num_keep_tokens=None, theta=0.5):
+    """
+    Get the input embeddings with optional CDPruner-based token pruning.
+    """
     kwargs = get_model_kwargs(model, inputs)
-
-    inputs_embeds = model.get_input_embeddings()(inputs.input_ids.to(cpu_device))
+    inputs_embeds = model.get_input_embeddings()(inputs.input_ids)
     B, _, emb_dim = inputs_embeds.shape
     assert B == 1
+
     special_image_mask = inputs_embeds == model.get_input_embeddings()(
         torch.tensor(model.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
     )  # (B, seq_len, emb_dim)
     special_image_mask = special_image_mask.all(-1)
 
-    text_embeds = inputs_embeds[~special_image_mask].view(-1, emb_dim)
-
-    # get mapped image features into the language embedding space
+    # Get mapped image features into the language embedding space
     image_embeds = model.get_image_features(
-        pixel_values=inputs.pixel_values.to(cpu_device),
+        pixel_values=inputs.pixel_values,
         **kwargs,
     )
 
+    flat_image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+    exp_special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+    inputs_embeds_with_images = inputs_embeds.masked_scatter(exp_special_image_mask, flat_image_embeds)
+
+    if num_keep_tokens is None:
+        return inputs_embeds_with_images
+
+    # Prune image tokens
+    text_embeds = inputs_embeds[~special_image_mask].view(-1, emb_dim)
     image_features = get_image_features(model, inputs, **kwargs)
+    kept_mask = get_cdpruner_mask(image_embeds, image_features, text_embeds, special_image_mask, num_keep_tokens, theta)
 
-    # Process each image independently
-    keep_indices = []
-    offset = 0
-    for emb_i, feat_i in zip(image_embeds, image_features):
-        rel_i = get_relevance_score(emb_i.unsqueeze(0), text_embeds)
-        sim_i = get_visual_similarity(feat_i)
-        kernel_i = build_conditional_kernel_matrix(rel_i, sim_i)
-        keep_i = conditional_dpp_map(kernel_i, num_keep_tokens)[0] + offset
-        keep_indices.append(keep_i)
-        offset += emb_i.shape[0]
-
-    # Flatten kept token indices
-    keep_indices = torch.cat(keep_indices, dim=0)
-
-    image_token_positions = torch.nonzero(special_image_mask[0], as_tuple=False).squeeze(1)  # shape [n_image_tokens]
-    kept_positions = image_token_positions[keep_indices]  # shape [len(flattened_indices)]
-    # Create new mask, preserve text tokens
-    kept_mask = ~special_image_mask.clone()
-    # Set selected image tokens to True
-    kept_mask[0, kept_positions] = True
-
-    inputs_embeds_with_img = get_input_embeds(model, inputs)
-    kept_mask = kept_mask.unsqueeze(-1).expand_as(inputs_embeds_with_img).to(inputs_embeds_with_img.device)
-    pruned_image_embeds = inputs_embeds_with_img[kept_mask].view(B, -1, emb_dim)
-    model.to(device)
-    return pruned_image_embeds.to(device)
+    # Apply mask to inputs_embeds directly
+    kept_mask = kept_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+    pruned_embeds = inputs_embeds_with_images[kept_mask].view(B, -1, emb_dim)
+    return pruned_embeds
