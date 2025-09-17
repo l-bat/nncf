@@ -208,21 +208,23 @@ class KVCacheCompressor:
                 self._cache_counter[layer_idx] = layer_counter
 
     def get_scores(self, layer_idx):
-        if self.score_aggregation == "sum":
-            if self._scores[layer_idx].dim() == 2:
-                return self._scores[layer_idx]
-
-            scores = self._scores[layer_idx].mean(dim=-2)  # Average over query length, shape: (H, k_len)
-            scores = F.max_pool1d(
-                scores,
-                kernel_size=7,
-                padding=7 // 2,
-                stride=1,
+        if self._scores[layer_idx].dim() == 2:
+            return (
+                self._scores[layer_idx]
+                if self.score_aggregation == "sum"
+                else self._scores[layer_idx] / self._cache_counter[layer_idx]
             )
-            self._scores[layer_idx] = None  # Clear scores after retrieval
-            return scores.mean(0, keepdim=True)[:, self.start_size :]  # Average over heads, shape: (1, k_len)
-        else:
-            return self._scores[layer_idx] / self._cache_counter[layer_idx]
+
+        # Average over query length, shape: (H, k_len)
+        scores = self._scores[layer_idx].mean(dim=-2)
+        scores = F.max_pool1d(
+            scores,
+            kernel_size=7,
+            padding=7 // 2,
+            stride=1,
+        )
+        self._scores[layer_idx] = None  # Clear scores after retrieval
+        return scores.mean(0, keepdim=True)[:, self.start_size :]  # Average over heads, shape: (1, k_len)
 
     def _get_keys_similarity(self, key_states):
         keys_normalized = key_states / key_states.norm(dim=-1, keepdim=True)
@@ -234,6 +236,7 @@ class KVCacheCompressor:
         for h in range(similarity.shape[0]):
             similarity[h].fill_diagonal_(0.0)
 
+        # Zero out values below mean similarity for each head
         head_means = similarity.view(similarity.shape[0], -1).mean(dim=-1, keepdim=True)
         thr = head_means.unsqueeze(-1)
         similarity = torch.where(similarity >= thr, similarity, torch.zeros_like(similarity))
@@ -472,6 +475,18 @@ class KVCacheCompressor:
 
         return refined_topk
 
+    def _set_balanced_refined_size(self, interm_scores):
+        target_mass = self.attn_mass_threshold * interm_scores.sum(dim=-1)
+        vals, _ = torch.sort(interm_scores, descending=True, dim=-1)
+        cumsum = vals.cumsum(dim=-1)
+        cutoff = (cumsum >= target_mass).nonzero(as_tuple=False)
+        # Minimum number of groups to cover the target mass
+        k_min = cutoff[0].item() + 1  # +1 because indices are 0-based
+        if k_min >= self.intermediate_size // self.group_size:
+            self.refined_size = 0
+        else:
+            self.refined_size = self.intermediate_size - k_min * self.group_size
+
     def _get_per_token_indices(self, scores: torch.Tensor, kwargs: dict) -> torch.Tensor:
         keep = []
         if self.start_size > 0:
@@ -480,6 +495,8 @@ class KVCacheCompressor:
 
         if self.intermediate_size > 0:
             intermediate_scores = scores[:, : scores.shape[-1] - self.recent_size]
+            if self.adaptive_refined_size:
+                self._set_balanced_refined_size(intermediate_scores)
 
             # Split into coarse (for primary algorithm) and refined parts (for secondary algorithm)
             coarse_size = self.intermediate_size - self.refined_size
@@ -505,18 +522,6 @@ class KVCacheCompressor:
 
         remaining_idx = torch.cat(keep, dim=-1)
         return remaining_idx
-
-    def _set_balanced_refined_size(self, interm_scores):
-        target_mass = self.attn_mass_threshold * interm_scores.sum(dim=-1)
-        vals, _ = torch.sort(interm_scores, descending=True, dim=-1)
-        cumsum = vals.cumsum(dim=-1)
-        cutoff = (cumsum >= target_mass).nonzero(as_tuple=False)
-        # Minimum number of groups to cover the target mass
-        k_min = cutoff[0].item() + 1  # +1 because indices are 0-based
-        if k_min >= self.intermediate_size // self.group_size:
-            self.refined_size = 0
-        else:
-            self.refined_size = self.intermediate_size - k_min * self.group_size
 
     def _get_per_group_indices(self, scores: torch.Tensor, kwargs: dict) -> torch.Tensor:
         # Pad scores with zeros to make it multiple by group_size

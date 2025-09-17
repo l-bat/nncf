@@ -30,8 +30,6 @@ from nncf.quantization.advanced_parameters import KVCacheCompressionParameters
 from nncf.quantization.advanced_parameters import KVCacheRefinedSelection
 from nncf.quantization.algorithms.kv_cache_management.torch_backend import KVCacheCompressor
 
-os.environ["HF_TOKEN"] = ""
-
 # (Phi3 and DeepSeek issue)
 # AttributeError: 'DynamicCache' object has no attribute 'get_max_length'. Did you mean: 'get_seq_length'?
 # The method get_max_length of 'DynamicCache' is deprecated and has been removed in transformer 4.49
@@ -415,7 +413,9 @@ if __name__ == "__main__":
         bnb_4bit_compute_dtype=torch.float16,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, token=os.environ["HF_TOKEN"])
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=True, token=os.environ.get("HF_TOKEN", None)
+    )
     config = AutoConfig.from_pretrained(
         args.model, trust_remote_code=True, attn_implementation="eager", output_attentions=True
     )
@@ -427,7 +427,7 @@ if __name__ == "__main__":
         torch_dtype=torch.bfloat16,
         device_map="auto",
         # quantization_config=quantization_config,
-        token=os.environ["HF_TOKEN"],
+        token=os.environ.get("HF_TOKEN", None),
     )
     model.generation_config.temperature = None
     model.generation_config.top_p = None

@@ -8,19 +8,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Callable, Generator, Optional
 from contextlib import contextmanager
+from typing import Callable, Generator, Optional
 
 import torch
-from torch import nn
 import torch.nn.functional as F
-from transformers import PreTrainedModel
-
-from transformers.models.llama.modeling_llama import repeat_kv
-from nncf.quantization.advanced_parameters import KVCachePrefillMode
 
 # pip install git+https://github.com/mit-han-lab/Block-Sparse-Attention.git
 from block_sparse_attn import block_sparse_attn_func
+from torch import nn
+from transformers import PreTrainedModel
+from transformers.models.llama.modeling_llama import repeat_kv
+
+from nncf.quantization.advanced_parameters import KVCachePrefillMode
 
 
 class SparsePrefill:
@@ -47,37 +47,44 @@ class SparsePrefill:
         elif self.algorithm == KVCachePrefillMode.DENSE:
             return dense_forward
         else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
+            error_msg = f"Unsupported KV cache prefill mode: {self.algorithm}"
+            raise ValueError(error_msg)
 
     def store_original_forward(self, model: PreTrainedModel):
         if "Qwen2_5_VLForConditionalGeneration" in model.config.architectures:
             from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import eager_attention_forward
+
             self._original_attn_impl = eager_attention_forward
         elif "Qwen2VLForConditionalGeneration" in model.config.architectures:
             from transformers.models.qwen2_vl.modeling_qwen2_vl import eager_attention_forward
+
             self._original_attn_impl = eager_attention_forward
         elif "LlavaForConditionalGeneration" in model.config.architectures:
             from transformers.models.llama.modeling_llama import eager_attention_forward
+
             self._original_attn_impl = eager_attention_forward
         elif "LlavaNextForConditionalGeneration" in model.config.architectures:
             if "LlamaForCausalLM" in model.config.text_config.architectures:
                 from transformers.models.llama.modeling_llama import eager_attention_forward
-                from transformers.models.llama.modeling_llama import repeat_kv
             elif "MistralForCausalLM" in model.config.text_config.architectures:
                 from transformers.models.mistral.modeling_mistral import eager_attention_forward
             self._original_attn_impl = eager_attention_forward
         else:
-            raise ValueError(f"Unsupported model class for: {model.config.architectures[0]}")
+            error_msg = f"Unsupported model class for: {model.config.architectures[0]}"
+            raise ValueError(error_msg)
 
     def reset_forward(self, model: PreTrainedModel, eager_impl: Callable):
         if "Qwen2_5_VLForConditionalGeneration" in model.config.architectures:
             import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as modeling
+
             modeling.eager_attention_forward = eager_impl
         elif "Qwen2VLForConditionalGeneration" in model.config.architectures:
             import transformers.models.qwen2_vl.modeling_qwen2_vl as modeling
+
             modeling.eager_attention_forward = eager_impl
         elif "LlavaForConditionalGeneration" in model.config.architectures:
             import transformers.models.llama.modeling_llama as modeling
+
             modeling.eager_attention_forward = eager_impl
         elif "LlavaNextForConditionalGeneration" in model.config.architectures:
             if "LlamaForCausalLM" in model.config.text_config.architectures:
@@ -86,7 +93,8 @@ class SparsePrefill:
                 import transformers.models.mistral.modeling_mistral as modeling
             modeling.eager_attention_forward = eager_impl
         else:
-            raise ValueError(f"Unsupported model class for: {model.config.architectures[0]}")
+            error_msg = f"Unsupported model class for: {model.config.architectures[0]}"
+            raise ValueError(error_msg)
 
     @contextmanager
     def __call__(self, model: PreTrainedModel) -> Generator:
@@ -106,6 +114,7 @@ class SparsePrefill:
             yield
         finally:
             self.reset_forward(model, self._original_attn_impl)
+
 
 def dense_forward(
     module: nn.Module,
@@ -150,7 +159,7 @@ def tri_shape_forward(
 
     last_query_size = kwargs.get("last_query_size", 100)
     if kwargs.get("return_attn_scores", False):
-        query_states_2 = query_states[:,:,-last_query_size:]
+        query_states_2 = query_states[:, :, -last_query_size:]
         attention_mask = attention_mask[:, :, -last_query_size:] if attention_mask is not None else None
         _, attn_weights = dense_forward(module, query_states_2, key_states, value_states, attention_mask, scaling)
     else:
@@ -171,7 +180,7 @@ def tri_shape_forward(
         device=query_states.device,
     )
     # keep_sink
-    simple_masks[:, :, 0, :] = True # keep first 128 tokens
+    simple_masks[:, :, 0, :] = True  # keep first 128 tokens
 
     # keep_recent
     recent_size = kwargs.get("recent_size", 1024)
@@ -180,18 +189,23 @@ def tri_shape_forward(
     k_idx = torch.arange(k_block_num, device=simple_masks.device).unsqueeze(0)  # shape: [1, K]
 
     keep_recent_mask = (k_idx <= q_idx) & (k_idx >= (q_idx - local_block_num))  # [Q, K]
-    keep_recent_mask = keep_recent_mask.unsqueeze(0).unsqueeze(0).expand(
-        1, num_head, q_block_num, k_block_num
-    ).to(simple_masks.device)
+    keep_recent_mask = (
+        keep_recent_mask.unsqueeze(0).unsqueeze(0).expand(1, num_head, q_block_num, k_block_num).to(simple_masks.device)
+    )
     simple_masks |= keep_recent_mask
 
     # keep_q_lasts
     padded_len = q_block_num * block_size - q_len
-    last_blocks_to_keep = (last_query_size + padded_len + block_size - 1) // block_size  # ceil(a / b) == (a + b - 1) // b
+    last_blocks_to_keep = (
+        last_query_size + padded_len + block_size - 1
+    ) // block_size  # ceil(a / b) == (a + b - 1) // b
     keep_q_lasts_mask = (k_idx <= q_idx) & (q_idx >= (q_block_num - last_blocks_to_keep))
-    keep_q_lasts_mask = keep_q_lasts_mask.unsqueeze(0).unsqueeze(0).expand(
-        1, num_head, q_block_num, k_block_num
-    ).to(simple_masks.device)
+    keep_q_lasts_mask = (
+        keep_q_lasts_mask.unsqueeze(0)
+        .unsqueeze(0)
+        .expand(1, num_head, q_block_num, k_block_num)
+        .to(simple_masks.device)
+    )
     simple_masks |= keep_q_lasts_mask
 
     query_states = query_states.transpose(1, 2).view(q_len, num_head, head_dim)
@@ -246,8 +260,8 @@ def xattention_forward(
     chunk_size = int(
         max(
             min(
-                max(2048, 1 << (k_len - 1).bit_length()),  #  next power of two ≥ k_len
-                128 * 1024 * 2048 // (1 << (k_len - 1).bit_length()),  #  # upper bound
+                max(2048, 1 << (k_len - 1).bit_length()),  # next power of two ≥ k_len
+                128 * 1024 * 2048 // (1 << (k_len - 1).bit_length()),  # # upper bound
             ),
             2048,  # lower bound
         )
@@ -255,7 +269,7 @@ def xattention_forward(
 
     last_query_size = kwargs.get("last_query_size", 100)
     if kwargs.get("return_attn_scores", False):
-        query_states_2 = query_states[:,:,-last_query_size:]
+        query_states_2 = query_states[:, :, -last_query_size:]
         attention_mask = attention_mask[:, :, -last_query_size:] if attention_mask is not None else None
         _, attn_weights = dense_forward(module, query_states_2, key_states, value_states, attention_mask, scaling)
     else:
@@ -307,49 +321,36 @@ def xattention_forward(
         is_causal=True,
         return_attn_probs=False,
     )
-    attn_output = attn_output.view(batch_size, q_len, num_kv_head, head_dim) #.transpose(1, 2)
+    attn_output = attn_output.view(batch_size, q_len, num_kv_head, head_dim)  # .transpose(1, 2)
 
-    # sparsity_level
-    # B, H, Qb, Kb = approx_simple_mask[:, :, :q_block_num, :k_block_num].shape
-    # causal_mask = torch.zeros_like(approx_simple_mask[:, :, :q_block_num, :k_block_num], dtype=torch.bool)
-    # for q in range(Qb):
-    #     causal_mask[:, :, q, : q + 1] = True  # Allow access to current and previous blocks
-    # used_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num]
-    # selected_blocks = used_mask.sum()
-    # allowed_blocks = causal_mask.sum()
-    # sparsity_level = float(1 - selected_blocks.item() / allowed_blocks.item())
-    # num_to_compute = (k_block_num + 1) * k_block_num / 2 * num_kv_head
     # sparsity_level = 1 - approx_simple_mask.sum() / approx_simple_mask.nelement()
     # print(f"approximated prefilling Computation: {approx_simple_mask.sum() / approx_simple_mask.nelement()}")
     # return attn_output, (attn_weights, sparsity_level)
     return attn_output, attn_weights
 
 
-def find_blocks_chunked(
-    input_tensor, current_index, threshold, num_to_choose, decoding: bool, mode: str = "both", causal=True
-):
+def find_blocks_chunked(input_tensor, current_index, threshold, decoding: bool, mode: str = "both", causal=True):
     """
-        Finds and selects relevant blocks of attention for transformer-based models based on a 
-        threshold or a predefined number of blocks.
+    Finds and selects relevant blocks of attention for transformer-based models based on a
+    threshold or a predefined number of blocks.
 
-        Parameters:
-        - input_tensor (torch.Tensor): The input tensor of shape (batch_size, head_num, chunk_num, block_num).
-        - current_index (int): The current index in the sequence processing.
-        - threshold (float or None): A threshold value used to determine the minimum attention weight sum.
-        - num_to_choose (int or None): The number of blocks to be selected, ensuring sufficient information retrieval.
-        - decoding (bool): If True, operates in decoding mode; otherwise, it's in encoding mode.
-        - mode (str): Defines the processing mode, either 'both', 'prefill', or 'decode'.
-        - causal (bool): If True, applies causal masking to prevent future information leakage.
+    Parameters
+    ----------
+    - input_tensor (torch.Tensor): The input tensor of shape (batch_size, head_num, chunk_num, block_num).
+    - current_index (int): The current index in the sequence processing.
+    - threshold (float or None): A threshold value used to determine the minimum attention weight sum.
+    - decoding (bool): If True, operates in decoding mode; otherwise, it's in encoding mode.
+    - mode (str): Defines the processing mode, either 'both', 'prefill', or 'decode'.
+    - causal (bool): If True, applies causal masking to prevent future information leakage.
 
-        Returns:
-        - torch.Tensor: A boolean mask of shape (batch_size, head_num, chunk_num, block_num),
-        indicating which blocks should be attended to.
+    Returns
+    -------
+    - torch.Tensor: A boolean mask of shape (batch_size, head_num, chunk_num, block_num),
+    indicating which blocks should be attended to.
     """
-    assert threshold is None or num_to_choose is None
+    assert threshold is None
     batch_size, head_num, chunk_num, block_num = input_tensor.shape
-    # 0 -- -- -- -- current_index
-    # 0 -- -- -- -- -- current_index+1
-    # 0 -- -- -- -- -- ----------- current_index + chunk_num - 1
+
     if mode == "prefill" and decoding:
         return torch.ones_like(input_tensor, dtype=torch.bool)
     if mode == "decode" and not decoding:
@@ -370,106 +371,93 @@ def find_blocks_chunked(
             return mask
     input_tensor = input_tensor.to(float)
 
-    if threshold is not None:
-        total_sum = input_tensor.sum(dim=-1, keepdim=True)
-        if isinstance(threshold, torch.Tensor):
-            threshold = threshold.to(float)
-            required_sum = total_sum * threshold.unsqueeze(0).unsqueeze(-1).unsqueeze(
-                -1
-            ).expand((batch_size, head_num, chunk_num, 1)).to(input_tensor.device)
-        else:
-            required_sum = total_sum * threshold
-        if causal:
-            mask = torch.zeros_like(input_tensor, dtype=torch.bool)
-            mask[:, :, :, 0] = 1  # keep the first key block
-            mask[:, :, :, current_index : current_index + chunk_num] = (  # keep the diagonal block
-                torch.eye(chunk_num, device=mask.device)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .expand(1, head_num, chunk_num, chunk_num)
-            )
-            other_values = input_tensor.masked_fill(
-                mask, 0
-            )
-            sorted_values, _ = torch.sort(
-                other_values, dim=-1, descending=True
-            )
-            sorted_values = sorted_values.to(input_tensor.device)
-
-            sorted_values = torch.cat(
-                [
-                    torch.zeros(
-                        (batch_size, head_num, chunk_num, 1), device=input_tensor.device
-                    ),  # cumulative logic
-                    torch.where(mask, input_tensor, 0).sum(dim=-1, keepdim=True),  # diagonal values
-                    sorted_values[:, :, :, :-2],
-                ],
-                dim=-1,
-            )
-
-            _, index = torch.sort(
-                torch.where(mask, 100000 * (1 + input_tensor), input_tensor),
-                dim=-1,
-                descending=True,
-            )
-            cumulative_sum_without_self = torch.cat(
-                [
-                    torch.zeros(
-                        (batch_size, head_num, chunk_num, 1), device=input_tensor.device
-                    ),
-                    sorted_values[:, :, :, 0:-1],
-                ],
-                dim=-1,
-            ).cumsum(dim=-1)
-
-            index_mask = cumulative_sum_without_self < required_sum
-            index = torch.where(index_mask,index,0)
-            mask = mask.view(batch_size,head_num*chunk_num,block_num)
-            index = index.view(batch_size,head_num*chunk_num,block_num)
-            mask[:,torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),index] = True
-            mask = mask.view(batch_size,head_num,chunk_num,block_num)
-        else:
-            mask = torch.zeros_like(input_tensor, dtype=torch.bool)
-            sorted_values, index = torch.sort(
-                input_tensor, dim=-1, descending=True
-            )
-            sorted_values = sorted_values.to(input_tensor.device)
-            cumulative_sum_without_self = torch.cat(
-                [
-                    torch.zeros(
-                        (batch_size, head_num, chunk_num, 1), device=input_tensor.device
-                    ),
-                    sorted_values[:, :, :, 0:-1],
-                ],
-                dim=-1,
-            ).cumsum(dim=-1)
-            index_mask = cumulative_sum_without_self < required_sum
-            index = torch.where(index_mask, index, 0)
-            mask = mask.view(batch_size, head_num * chunk_num, block_num)
-            index = index.view(batch_size, head_num * chunk_num, block_num)
-            mask[
-                :,
-                torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),
-                index,
-            ] = True
-            mask = mask.view(batch_size, head_num, chunk_num, block_num)
+    total_sum = input_tensor.sum(dim=-1, keepdim=True)
+    if isinstance(threshold, torch.Tensor):
+        threshold = threshold.to(float)
+        required_sum = total_sum * threshold.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(
+            (batch_size, head_num, chunk_num, 1)
+        ).to(input_tensor.device)
     else:
-        raise NotImplementedError("block num chunk prefill not impleted")
-    
+        required_sum = total_sum * threshold
+    if causal:
+        mask = torch.zeros_like(input_tensor, dtype=torch.bool)
+        mask[:, :, :, 0] = 1  # keep the first key block
+        mask[:, :, :, current_index : current_index + chunk_num] = (  # keep the diagonal block
+            torch.eye(chunk_num, device=mask.device).unsqueeze(0).unsqueeze(0).expand(1, head_num, chunk_num, chunk_num)
+        )
+        other_values = input_tensor.masked_fill(mask, 0)
+        sorted_values, _ = torch.sort(other_values, dim=-1, descending=True)
+        sorted_values = sorted_values.to(input_tensor.device)
+
+        sorted_values = torch.cat(
+            [
+                torch.zeros((batch_size, head_num, chunk_num, 1), device=input_tensor.device),  # cumulative logic
+                torch.where(mask, input_tensor, 0).sum(dim=-1, keepdim=True),  # diagonal values
+                sorted_values[:, :, :, :-2],
+            ],
+            dim=-1,
+        )
+
+        _, index = torch.sort(
+            torch.where(mask, 100000 * (1 + input_tensor), input_tensor),
+            dim=-1,
+            descending=True,
+        )
+        cumulative_sum_without_self = torch.cat(
+            [
+                torch.zeros((batch_size, head_num, chunk_num, 1), device=input_tensor.device),
+                sorted_values[:, :, :, 0:-1],
+            ],
+            dim=-1,
+        ).cumsum(dim=-1)
+
+        index_mask = cumulative_sum_without_self < required_sum
+        index = torch.where(index_mask, index, 0)
+        mask = mask.view(batch_size, head_num * chunk_num, block_num)
+        index = index.view(batch_size, head_num * chunk_num, block_num)
+        mask[:, torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1), index] = True
+        mask = mask.view(batch_size, head_num, chunk_num, block_num)
+    else:
+        mask = torch.zeros_like(input_tensor, dtype=torch.bool)
+        sorted_values, index = torch.sort(input_tensor, dim=-1, descending=True)
+        sorted_values = sorted_values.to(input_tensor.device)
+        cumulative_sum_without_self = torch.cat(
+            [
+                torch.zeros((batch_size, head_num, chunk_num, 1), device=input_tensor.device),
+                sorted_values[:, :, :, 0:-1],
+            ],
+            dim=-1,
+        ).cumsum(dim=-1)
+        index_mask = cumulative_sum_without_self < required_sum
+        index = torch.where(index_mask, index, 0)
+        mask = mask.view(batch_size, head_num * chunk_num, block_num)
+        index = index.view(batch_size, head_num * chunk_num, block_num)
+        mask[
+            :,
+            torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),
+            index,
+        ] = True
+        mask = mask.view(batch_size, head_num, chunk_num, block_num)
+
     try:
         if causal:
             assert (~mask[:, :, :, current_index + chunk_num :]).all()
-    except:
+    except Exception:
         mask[:, :, :, current_index + chunk_num :] = False
 
     if causal:
         if decoding:
             assert mask[:, :, :, 0].all() and mask[:, :, :, -1].all()
         else:
-            lambda_mask = torch.zeros_like(input_tensor,dtype=bool,device=input_tensor.device)
-            lambda_mask[:,:,:,0] = 1
-            lambda_mask[:,:,:,current_index:current_index+chunk_num] = torch.eye(chunk_num, device=lambda_mask.device).unsqueeze(0).unsqueeze(0).expand(1,head_num,chunk_num,chunk_num)
-            assert(torch.where(lambda_mask,mask,True).all())
+            lambda_mask = torch.zeros_like(input_tensor, dtype=bool, device=input_tensor.device)
+            lambda_mask[:, :, :, 0] = 1
+            lambda_mask[:, :, :, current_index : current_index + chunk_num] = (
+                torch.eye(chunk_num, device=lambda_mask.device)
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .expand(1, head_num, chunk_num, chunk_num)
+            )
+            assert torch.where(lambda_mask, mask, True).all()
 
     return mask
 
@@ -516,14 +504,9 @@ def xattn_estimate(
     q_reshaped_num_to_pad = q_num_to_pad // stride
     num_blocks_per_chunk = reshaped_chunk_size // reshaped_block_size
 
-    reshaped_key = torch.cat(
-        [(pad_key_states[:, :, k::stride, :]) for k in range(stride)], dim=-1
-    )
+    reshaped_key = torch.cat([(pad_key_states[:, :, k::stride, :]) for k in range(stride)], dim=-1)
     reshaped_query = torch.cat(
-        [
-            (pad_query_states[:, :, (stride - 1 - q) :: stride, :])
-            for q in range(stride)
-        ],
+        [(pad_query_states[:, :, (stride - 1 - q) :: stride, :]) for q in range(stride)],
         dim=-1,
     )
     assert reshaped_key.shape[-2] == k_reshaped_seq_len
@@ -537,9 +520,7 @@ def xattn_estimate(
         ]
         attn_weights_slice = torch.matmul(chunked_query, reshaped_key.transpose(2, 3))
 
-        attn_weights_slice = (
-            attn_weights_slice / (head_dim ** 0.5) / stride
-        )
+        attn_weights_slice = attn_weights_slice / (head_dim**0.5) / stride
 
         causal_mask = torch.zeros(
             (
@@ -566,21 +547,15 @@ def xattn_estimate(
         )
 
         if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
-            causal_mask[:, :, (-(q_reshaped_num_to_pad)) :, :] = float(
-                "-inf"
-            )
+            causal_mask[:, :, (-(q_reshaped_num_to_pad)):, :] = float("-inf")
 
         causal_mask[:, :, :, chunk_end:] = float("-inf")
-        attn_weights_slice = attn_weights_slice + causal_mask.to(
-            attn_weights_slice.device
-        )
+        attn_weights_slice = attn_weights_slice + causal_mask.to(attn_weights_slice.device)
 
-        attn_weights_slice = F.softmax(
-            attn_weights_slice, dim=-1, dtype=torch.float32
-        ).to(pad_query_states.dtype)
+        attn_weights_slice = F.softmax(attn_weights_slice, dim=-1, dtype=torch.float32).to(pad_query_states.dtype)
 
         if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
-            attn_weights_slice[:, :, -q_reshaped_num_to_pad :, :] = 0
+            attn_weights_slice[:, :, -q_reshaped_num_to_pad:, :] = 0
 
         attn_sum = (
             attn_weights_slice.view(
@@ -593,7 +568,7 @@ def xattn_estimate(
             )
             .sum(dim=-1)
             .sum(dim=-2)
-            .sum(dim=1, keepdim=True) # GenAI aggregation accross heads
+            .sum(dim=1, keepdim=True)  # GenAI aggregation accross heads
         )  # attention mass per block
         del chunked_query
 
@@ -618,9 +593,7 @@ def xattn_estimate(
 
     simple_masks[:, :, -q_block_num:, -q_block_num:] = torch.where(
         torch.tril(
-            torch.ones(
-                q_block_num, q_block_num, dtype=bool, device=key_states.device
-            ),
+            torch.ones(q_block_num, q_block_num, dtype=bool, device=key_states.device),
             diagonal=0,
         ),
         simple_masks[:, :, -q_block_num:, -q_block_num:],
@@ -630,25 +603,19 @@ def xattn_estimate(
         simple_masks[:, :, 0, :] = True
     if keep_recent:
         eye_matrix = torch.eye(q_block_num, device=simple_masks.device, dtype=bool)
-        eye_matrix_expanded = (
-            eye_matrix.unsqueeze(0)
-            .unsqueeze(0)
-            .expand(1, num_kv_head, q_block_num, q_block_num)
-        )
+        eye_matrix_expanded = eye_matrix.unsqueeze(0).unsqueeze(0).expand(1, num_kv_head, q_block_num, q_block_num)
         simple_masks[:, :, -q_block_num:, -q_block_num:] = torch.where(
             eye_matrix_expanded, True, simple_masks[:, :, -q_block_num:, -q_block_num:]
         )
     if keep_q_lasts:
         q_last_tokens = 100
         q_blocks_to_keep = (q_last_tokens + block_size - 1) // block_size
-        
+
         q_rows = torch.arange(q_block_num, device=simple_masks.device)
         q_keep_mask = q_rows >= (q_block_num - q_blocks_to_keep)
 
         q_keep_mask = q_keep_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # (1, 1, q_block_num, 1)
         q_keep_mask = q_keep_mask.expand(1, num_kv_head, q_block_num, k_block_num)
-        simple_masks[:, :, -q_block_num:, :] = torch.where(
-            q_keep_mask, True, simple_masks[:, :, -q_block_num:, :]
-        )
+        simple_masks[:, :, -q_block_num:, :] = torch.where(q_keep_mask, True, simple_masks[:, :, -q_block_num:, :])
 
     return attn_sums, simple_masks
