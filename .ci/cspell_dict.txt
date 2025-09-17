@@ -430,6 +430,7 @@ signedness
 silu
 smol
 smolm
+snapkv
 softmax
 sota
 sparsifiable
