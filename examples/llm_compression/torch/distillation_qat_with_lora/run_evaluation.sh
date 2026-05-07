@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Output directories to process
-OUTPUT_DIRS=("output")
-# PRETRAINED="meta-llama/Llama-3.2-1B-Instruct"
-PRETRAINED="Qwen/Qwen3-4B"
+OUTPUT_DIRS=("output_cosine")
+PRETRAINED="meta-llama/Llama-3.2-3B-Instruct"
+# PRETRAINED="Qwen/Qwen3-4B"
 
 # Checkpoint files to evaluate
 CKPT_FILES=(

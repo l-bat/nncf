@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# Prevent CUDA allocator fragmentation across grid-search runs.
+# Without this, TorchInductor kernel compilation buffers (allocated at step 0)
+# can fail with OOM when the allocator holds many small free blocks from prior runs.
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+
 # ── Usage ───────────────────────────────────────────────────────────
 # Grid search (default):
 #   ./run_grid_search.sh
@@ -23,23 +28,48 @@ set -euo pipefail
 # ────────────────────────────────────────────────────────────────────
 
 # PRETRAINED="meta-llama/Llama-3.2-1B-Instruct"
-PRETRAINED="Qwen/Qwen3-4B"
-OUTPUT_DIR="output"
-LOG_FILE="grid_search.log"
+# PRETRAINED="Qwen/Qwen3-4B"
+PRETRAINED="meta-llama/Llama-3.2-3B-Instruct"
+# OUTPUT_DIR="output_llama_3b-instruct_slimpajama_32768_3e-4"
+# LOG_FILE="grid_search_llama_3b-instruct_slimpajama_32768_3e-4.log"
+OUTPUT_DIR="output_llama_3b-instruct_metamathqa_32768_3e-4_1"
+LOG_FILE="grid_search_llama_3b-instruct_metamathqa_32768_3e-4.log"
+
 CONFIGS_FILE=""
 DEBUG_FLAG=""
 COMPRESSION_FORMAT="FQ_LORA"
 USE_AUTOGRAD_QUANTIZE=""
+# gradient_checkpointing is incompatible with NNCF FQ hooks (CheckpointError:
+# different tensor count on forward vs recomputation). Disabled for now.
+# GRADIENT_CHECKPOINTING="--gradient_checkpointing"
 GRADIENT_CHECKPOINTING=""
 SE_INIT=true
 INIT_CKPT=""
 LORA_RANK=256
-NUM_TRAIN_SAMPLES=1024
+# NUM_TRAIN_SAMPLES=32768
+NUM_TRAIN_SAMPLES=4096
 TRAIN_SEQLEN=1024
-BATCH_SIZE=32
-DATASET="pile"
+BATCH_SIZE=64
+# BATCH_SIZE=32
+# MICROBATCH_SIZE=4
+DATASET="numina_math"
+# DATASET="metamathqa"
+# DATASET="slimpajama"
+
+# Streaming mode (LR-QAT style: unique data per step).
+# Set TOTAL_STEPS to enable; leave empty for epoch-based mode.
+TOTAL_STEPS=1500
+WARMUP_STEPS=100
+CONSTANT_STEPS=0
+SHARD_SIZE=512
+SAVE_STEPS="250 500 750 1000 1250 1500"
+# SAVE_STEPS="500 1000 2000 3000 5000 7000 10000"
+# HIDDENS_DIR="/home/ltalamanova/nncf/examples/llm_compression/torch/distillation_qat_with_lora/output_llama_3b-instruct_slimpajama_32768_1/hiddens_shards"    # Set to reuse pre-computed hiddens from another run
+HIDDENS_DIR=""
+SIGMOID_SCALE=""  # Set to "--sigmoid_scale" to use ApiQ-style sigmoid reparameterization
 
 # ── Parse CLI arguments ─────────────────────────────────────────────
+        # --microbatch_size ) MICROBATCH_SIZE="$2"; shift ;;
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --configs)   CONFIGS_FILE="$2"; shift 2 ;;
@@ -57,6 +87,12 @@ while [[ $# -gt 0 ]]; do
         --train_seqlen) TRAIN_SEQLEN="$2"; shift 2 ;;
         --batch_size) BATCH_SIZE="$2"; shift 2 ;;
         --dataset) DATASET="$2"; shift 2 ;;
+        --total_steps) TOTAL_STEPS="$2"; shift 2 ;;
+        --warmup_steps) WARMUP_STEPS="$2"; shift 2 ;;
+        --constant_steps) CONSTANT_STEPS="$2"; shift 2 ;;
+        --shard_size) SHARD_SIZE="$2"; shift 2 ;;
+        --hiddens_dir) HIDDENS_DIR="$2"; shift 2 ;;
+        --sigmoid_scale) SIGMOID_SCALE="--sigmoid_scale"; shift ;;
         -h|--help)
             sed -n '3,18p' "$0"
             exit 0 ;;
@@ -119,10 +155,22 @@ run_config() {
     echo "  fq_lr=${fq_lr}  lora_lr=${lora_lr}  fq_wd=${fq_wd}  lora_wd=${lora_wd}  warmup=${warmup}  constant=${constant}  cosine=${cosine}"
     echo "  lora_rank=${run_lora_rank}  num_train_samples=${run_num_samples}  train_seqlen=${run_seqlen}  batch_size=${run_batch}"
     echo "  compression_format=${COMPRESSION_FORMAT}"
+    if [[ -n "$TOTAL_STEPS" ]]; then
+        echo "  STREAMING MODE: total_steps=${TOTAL_STEPS}  warmup_steps=${WARMUP_STEPS}  constant_steps=${CONSTANT_STEPS}  shard_size=${SHARD_SIZE}"
+    fi
     echo "  output_dir=$(realpath -m "$run_output_dir")"
     echo "  log_file - $(realpath -m "$LOG_FILE")"
     echo "============================================================"
 
+    # Build streaming-mode args or epoch-based args.
+    local SCHEDULE_ARGS
+    if [[ -n "$TOTAL_STEPS" ]]; then
+        SCHEDULE_ARGS="--total_steps $TOTAL_STEPS --warmup_steps $WARMUP_STEPS --constant_steps $CONSTANT_STEPS --shard_size $SHARD_SIZE --save_steps $SAVE_STEPS"
+    else
+        SCHEDULE_ARGS="--warmup_epochs $warmup --constant_epochs $constant --cosine_epochs $cosine"
+    fi
+
+        # --microbatch_size "$MICROBATCH_SIZE" \
     if python main.py \
         --pretrained "$PRETRAINED" \
         --lora_rank "$run_lora_rank" \
@@ -133,9 +181,7 @@ run_config() {
         --lora_lr "$lora_lr" \
         --fq_weight_decay "$fq_wd" \
         --lora_weight_decay "$lora_wd" \
-        --warmup_epochs "$warmup" \
-        --constant_epochs "$constant" \
-        --cosine_epochs "$cosine" \
+        $SCHEDULE_ARGS \
         --min_lr_ratio 0.1 \
         --output_dir "$run_output_dir" \
         --run_name "$RUN_NAME" \
@@ -146,6 +192,8 @@ run_config() {
         $USE_AUTOGRAD_QUANTIZE \
         $GRADIENT_CHECKPOINTING \
         ${INIT_CKPT:+--init_ckpt "$INIT_CKPT"} \
+        ${HIDDENS_DIR:+--hiddens_dir "$HIDDENS_DIR"} \
+        $SIGMOID_SCALE \
         $DEBUG_FLAG \
         >> "$LOG_FILE" 2>&1; then
         echo "  ✓ ${RUN_NAME} succeeded"

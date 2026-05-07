@@ -1,7 +1,7 @@
 # fq_lr  lora_lr  fq_wd  lora_wd  warmup  constant  cosine [lora_rank  num_train_samples  train_seqlen  batch_size]
 # 1e-3     1e-3     1e-3   1e-4     0       0         5     #   64         512                512           8
-1e-5     1e-4     1e-4   1e-4     0       15         0     #   64         512                512           8
-# 1e-5     1e-4     1e-4   1e-4     0       0         15     #   64         512                512           8
+# 1e-5     1e-4     1e-4   1e-4     0       15         0     #   64         512                512           8
+1e-5     3e-4     1e-4   1e-4     0       0         15     #   64         512                512           8
 # 9.86e-5   9.86e-5    1e-4   1e-5     0       0         14     #   64         512                512           8
 # 1e-4     1e-3     1e-3   1e-3     1       2         12
 # 1e-4     1e-4     1e-4   1e-5     1       2         12

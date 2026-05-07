@@ -21,7 +21,7 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 from pprint import pprint
-from typing import Any, Optional, Union
+from typing import Any, Iterator, Optional, Union
 
 import mlflow
 import torch
@@ -57,6 +57,13 @@ from nncf.torch.quantization.layers import SymmetricLoraQuantizer
 from nncf.torch.quantization.quantize_functions import set_use_autograd_quantize
 
 warnings.filterwarnings("ignore", category=TracerWarning)
+
+
+def _log_dataset_size(name: str, found: int, requested: int) -> None:
+    if found < requested:
+        print(f"[dataset] {name}: {found} unique samples pass the seqlen filter (requested {requested})")
+    else:
+        print(f"[dataset] {name}: {found} samples will be used for tuning")
 
 
 def get_wikitext2(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device) -> list[Tensor]:
@@ -105,13 +112,239 @@ def get_pile(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device
         if len(trainloader) >= num_samples:
             break
 
+    _log_dataset_size("pile", len(trainloader), num_samples)
+    return trainloader
+
+
+def get_slimpajama(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device):
+    ds = load_dataset("DKYoon/SlimPajama-6B", split="train")
+    trainloader = []
+    for example in ds:
+        trainenc = tokenizer(example["text"], return_tensors="pt")
+        if trainenc.input_ids.shape[1] < seqlen:
+            continue
+        if trainenc.input_ids.shape[1] > seqlen + 1:
+            i = torch.randint(0, trainenc.input_ids.shape[1] - seqlen - 1, (1,)).item()
+        else:
+            i = 0
+        j = i + seqlen
+        inp = trainenc.input_ids[:, i:j].to(device)
+        trainloader.append(inp)
+        if len(trainloader) >= num_samples:
+            break
+    _log_dataset_size("slimpajama", len(trainloader), num_samples)
+    return trainloader
+
+
+def get_metamathqa(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device):
+    ds = load_dataset("meta-math/MetaMathQA", split="train")
+    trainloader = []
+    for example in ds:
+        text = example["query"] + "\n" + example["response"]
+        trainenc = tokenizer(text, return_tensors="pt")
+        if trainenc.input_ids.shape[1] < seqlen:
+            continue
+        if trainenc.input_ids.shape[1] > seqlen + 1:
+            i = torch.randint(0, trainenc.input_ids.shape[1] - seqlen - 1, (1,)).item()
+        else:
+            i = 0
+        j = i + seqlen
+        inp = trainenc.input_ids[:, i:j].to(device)
+        trainloader.append(inp)
+        if len(trainloader) >= num_samples:
+            break
+    _log_dataset_size("metamathqa", len(trainloader), num_samples)
+    return trainloader
+
+
+def get_numina_math(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device):
+    ds = load_dataset("AI-MO/NuminaMath-CoT", split="train")
+    trainloader = []
+    for example in ds:
+        text = example["problem"] + "\n" + example["solution"]
+        trainenc = tokenizer(text, return_tensors="pt")
+        if trainenc.input_ids.shape[1] < seqlen:
+            continue
+        if trainenc.input_ids.shape[1] > seqlen + 1:
+            i = torch.randint(0, trainenc.input_ids.shape[1] - seqlen - 1, (1,)).item()
+        else:
+            i = 0
+        inp = trainenc.input_ids[:, i : i + seqlen].to(device)
+        trainloader.append(inp)
+        if len(trainloader) >= num_samples:
+            break
+    _log_dataset_size("numina_math", len(trainloader), num_samples)
     return trainloader
 
 
 DATASET_LOADERS = {
     "pile": get_pile,
     "wikitext": get_wikitext2,
+    "slimpajama": get_slimpajama,
+    "metamathqa": get_metamathqa,
+    "numina_math": get_numina_math,
 }
+
+
+# ── Streaming data & sharded hiddens (for LR-QAT-style unique-data-per-step training) ──
+
+
+def iter_tokenized_samples(
+    dataset_name: str,
+    seqlen: int,
+    tokenizer: Any,
+    device: torch.device,
+    seed: int = 42,
+) -> Iterator[Tensor]:
+    """
+    Infinite iterator that yields tokenized samples of length ``seqlen`` from a HF dataset.
+
+    Streams through the dataset once, then reshuffles and repeats (with a different seed each pass).
+    Each sample is a ``[1, seqlen]`` tensor of input_ids on ``device``.
+    """
+    pass_num = 0
+    while True:
+        if dataset_name == "slimpajama":
+            ds = load_dataset("DKYoon/SlimPajama-6B", split="train")
+        elif dataset_name == "pile":
+            ds = load_dataset("NeelNanda/pile-10k", split="train")
+        elif dataset_name == "metamathqa":
+            ds = load_dataset("meta-math/MetaMathQA", split="train")
+        elif dataset_name == "numina_math":
+            ds = load_dataset("AI-MO/NuminaMath-CoT", split="train")
+        else:
+            error = f"Streaming not supported for dataset '{dataset_name}'."
+            raise ValueError(error)
+        ds = ds.shuffle(seed=seed + pass_num)
+        for example in ds:
+            if dataset_name == "metamathqa":
+                text = example["query"] + "\n" + example["response"]
+            elif dataset_name == "numina_math":
+                text = example["problem"] + "\n" + example["solution"]
+            else:
+                text = example["text"]
+            enc = tokenizer(text, return_tensors="pt")
+            if enc.input_ids.shape[1] < seqlen:
+                continue
+            if enc.input_ids.shape[1] > seqlen + 1:
+                i = torch.randint(0, enc.input_ids.shape[1] - seqlen - 1, (1,)).item()
+            else:
+                i = 0
+            yield enc.input_ids[:, i : i + seqlen].to(device)
+        pass_num += 1
+
+
+def collect_samples(
+    dataset_name: str, num_samples: int, seqlen: int, tokenizer: Any, device: torch.device
+) -> list[Tensor]:
+    """Collect a fixed number of samples from the streaming iterator."""
+    it = iter_tokenized_samples(dataset_name, seqlen, tokenizer, device)
+    samples = [next(it) for _ in range(num_samples)]
+    _log_dataset_size(dataset_name, len(samples), num_samples)
+    return samples
+
+
+@torch.no_grad()
+def calc_hiddens_sharded(
+    model: nn.Module,
+    samples: list[Tensor],
+    hiddens_dir: Path,
+    shard_size: int = 512,
+) -> int:
+    """
+    Compute teacher hidden states and save them to disk in shards.
+
+    Each shard file contains a list of ``shard_size`` hidden state tensors (on CPU).
+    Training data (input_ids) is saved alongside in matching shard files.
+
+    :param model: Teacher model (unquantized) to compute hidden states.
+    :param samples: List of input_ids tensors.
+    :param hiddens_dir: Directory to write shard files.
+    :param shard_size: Number of samples per shard file.
+    :return: Total number of shards written.
+    """
+    hiddens_dir.mkdir(parents=True, exist_ok=True)
+    shard_idx = 0
+    shard_hiddens: list[Tensor] = []
+    shard_inputs: list[Tensor] = []
+
+    for data in track(samples, description="Computing teacher hiddens (sharded)"):
+        model_input = get_model_input(data)
+        hidden = model.model(**model_input).last_hidden_state.cpu()
+        shard_hiddens.append(hidden)
+        shard_inputs.append(data.cpu())
+
+        if len(shard_hiddens) == shard_size:
+            torch.save(
+                {"hiddens": shard_hiddens, "input_ids": shard_inputs},
+                hiddens_dir / f"shard_{shard_idx:05d}.pt",
+            )
+            shard_idx += 1
+            shard_hiddens = []
+            shard_inputs = []
+
+    # Save the last partial shard.
+    if shard_hiddens:
+        torch.save(
+            {"hiddens": shard_hiddens, "input_ids": shard_inputs},
+            hiddens_dir / f"shard_{shard_idx:05d}.pt",
+        )
+        shard_idx += 1
+
+    torch.cuda.empty_cache()
+    print(f"Saved {len(samples)} samples in {shard_idx} shards to {hiddens_dir}")
+    return shard_idx
+
+
+class StreamingShardLoader:
+    """
+    Yields (input_ids_batch, teacher_hiddens_batch) from disk shards.
+
+    Loads one shard at a time into RAM, yields microbatches from it, then moves
+    to the next shard. After exhausting all shards, reshuffles shard order and repeats.
+    Only ~shard_size * hidden_dim * 2 bytes of hiddens are in RAM at any time.
+    """
+
+    def __init__(self, hiddens_dir: Path, microbatch_size: int, device: torch.device, dtype: torch.dtype):
+        self.hiddens_dir = hiddens_dir
+        self.microbatch_size = microbatch_size
+        self.device = device
+        self.dtype = dtype
+        self.shard_files = sorted(hiddens_dir.glob("shard_*.pt"))
+        if not self.shard_files:
+            error = f"No shard files found in {hiddens_dir}"
+            raise FileNotFoundError(error)
+        # Count total samples across all shards (read metadata of first/last to estimate).
+        self._total_samples = 0
+        for sf in self.shard_files:
+            shard = torch.load(sf, weights_only=False, map_location="cpu")
+            self._total_samples += len(shard["hiddens"])
+            del shard
+
+    @property
+    def total_samples(self) -> int:
+        return self._total_samples
+
+    def __iter__(self) -> Iterator[tuple[Tensor, Tensor]]:
+        """Yields (input_ids [mb, seqlen], teacher_hiddens [mb, seqlen, hidden]) tuples."""
+        while True:
+            # Shuffle shard order each pass for better data mixing.
+            perm = torch.randperm(len(self.shard_files)).tolist()
+            for shard_idx in perm:
+                shard = torch.load(self.shard_files[shard_idx], weights_only=False, map_location="cpu")
+                hiddens_list = shard["hiddens"]
+                inputs_list = shard["input_ids"]
+                n = len(hiddens_list)
+                # Shuffle samples within the shard.
+                sample_perm = torch.randperm(n).tolist()
+                for mb_start in range(0, n - n % self.microbatch_size, self.microbatch_size):
+                    mb_indices = sample_perm[mb_start : mb_start + self.microbatch_size]
+                    input_ids = torch.cat([inputs_list[i] for i in mb_indices], dim=0).to(self.device)
+                    teacher_h = torch.cat([hiddens_list[i] for i in mb_indices], dim=0).to(
+                        device=self.device, dtype=self.dtype
+                    )
+                    yield input_ids, teacher_h
+                del shard, hiddens_list, inputs_list
 
 
 # def measure_perplexity(
@@ -223,6 +456,93 @@ def evaluate_with_vllm(
     return results
 
 
+def apply_sigmoid_scale_reparam(model: nn.Module, gamma_init: float = 4.0) -> int:
+    """
+    Apply ApiQ-style sigmoid reparameterization to FQ scale parameters.
+
+    Replaces direct scale training with sigmoid-constrained training:
+        scale_effective = sigmoid(gamma) * scale_init
+
+    This bounds the scale to (0, scale_init), preventing scale explosion.
+    Initialized at gamma=4.0 so sigmoid(4)≈0.982, i.e. ~98% of original scale.
+
+    The raw _scale_param_storage is updated via a forward pre-hook before each
+    quantize() call, so the rest of NNCF (checkpoint save/load, strip) sees
+    the effective scale transparently.
+
+    :param model: Model with NNCF FQ+LoRA hooks.
+    :param gamma_init: Initial value for gamma parameter. Default 4.0 (sigmoid≈0.982).
+    :return: Number of quantizers reparameterized.
+    """
+    count = 0
+    resumed = 0
+    hook_storage = get_hook_storage(model)
+    for name, module in hook_storage.named_hooks():
+        if not isinstance(module, SymmetricLoraQuantizer):
+            continue
+
+        if hasattr(module, "_gamma"):
+            # Already reparameterized (restored from checkpoint via load_state_dict).
+            # Just re-register the hooks (hooks aren't serialized) and reconfigure grads.
+            resumed += 1
+        else:
+            # Fresh init: save original scale as frozen buffer, create gamma.
+            scale_init = module._scale_param_storage.data.clone()
+            module.register_buffer("_scale_init", scale_init)
+
+            gamma = torch.full_like(scale_init, gamma_init, dtype=torch.float32)
+            module._gamma = nn.Parameter(gamma)
+
+        # Keep _scale_param_storage "alive" for gradients: the FQ STE computes
+        # ∂L/∂s. We'll chain-rule that into ∂L/∂γ via a backward hook on _gamma.
+        # Note: _scale_param_storage stays trainable for STE gradient, but the
+        # optimizer never touches it — only _gamma goes into param groups.
+        module._scale_param_storage.requires_grad_(True)
+        module._gamma.requires_grad_(False)  # Turned on later by set_trainable()
+
+        # Forward pre-hook: update _scale_param_storage.data BEFORE quantize().
+        # Uses .data so autograd still treats _scale_param_storage as a leaf.
+        def _update_scale(mod, args):
+            with torch.no_grad():
+                sig = torch.sigmoid(mod._gamma.to(mod._scale_init.dtype))
+                mod._scale_param_storage.data.copy_(sig * mod._scale_init)
+
+        module.register_forward_pre_hook(_update_scale)
+
+        # Backward hook on _scale_param_storage: chain-rule gradient to _gamma.
+        # ∂L/∂γ = ∂L/∂s · ∂s/∂γ = ∂L/∂s · σ(γ)(1-σ(γ)) · s_init
+        # Guard: only register once (tensor hooks survive across forward/backward,
+        # but not across save/load — _scale_param_storage is recreated by load_state_dict).
+        if not getattr(module, "_sigmoid_bwd_hook_registered", False):
+
+            def _chain_grad_to_gamma(mod):
+                def hook(grad):
+                    with torch.no_grad():
+                        sig = torch.sigmoid(mod._gamma.to(mod._scale_init.dtype))
+                        dsig_dgamma = sig * (1.0 - sig)  # sigmoid derivative
+                        gamma_grad = (grad * dsig_dgamma * mod._scale_init).to(mod._gamma.dtype)
+                        if mod._gamma.grad is None:
+                            mod._gamma.grad = gamma_grad
+                        else:
+                            mod._gamma.grad.add_(gamma_grad)
+                    # Zero out scale grad so optimizer (if it somehow sees it) does nothing.
+                    return torch.zeros_like(grad)
+
+                return hook
+
+            module._scale_param_storage.register_hook(_chain_grad_to_gamma(module))
+            module._sigmoid_bwd_hook_registered = True
+        count += 1
+
+    status = f"Sigmoid scale reparameterization: {count} quantizers"
+    if resumed:
+        status += f" ({resumed} restored from checkpoint)"
+    else:
+        status += f", gamma_init={gamma_init} (σ={torch.sigmoid(torch.tensor(gamma_init)):.4f})"
+    print(status)
+    return count
+
+
 @torch.no_grad()
 def calc_hiddens(model: nn.Module, dataloader: list[Tensor]) -> list[Tensor]:
     """
@@ -235,7 +555,7 @@ def calc_hiddens(model: nn.Module, dataloader: list[Tensor]) -> list[Tensor]:
     orig_hiddens = []
     for data in track(dataloader, description="Calculating original hiddens"):
         model_input = get_model_input(data)
-        orig_hiddens.append(model.model(**model_input).last_hidden_state)
+        orig_hiddens.append(model.model(**model_input).last_hidden_state.cpu())
     torch.cuda.empty_cache()
     return orig_hiddens
 
@@ -317,6 +637,10 @@ def log_quantizer_stats(model: nn.Module, step: int, optimizer: torch.optim.Opti
             metrics[f"{prefix}/alpha_norm"] = module.alpha.data.float().norm().item()
         elif isinstance(module, SymmetricLoraQuantizer):
             metrics[f"{prefix}/scale_norm"] = module.scale.data.float().norm().item()
+            if hasattr(module, "_gamma"):
+                gamma_val = module._gamma.data.float()
+                metrics[f"{prefix}/gamma_mean"] = gamma_val.mean().item()
+                metrics[f"{prefix}/sigmoid_gamma_mean"] = torch.sigmoid(gamma_val).mean().item()
 
         # Gradient norms
         for param_name, param in [("lora_A", module.lora_A), ("lora_B", module.lora_B)]:
@@ -332,9 +656,13 @@ def log_quantizer_stats(model: nn.Module, step: int, optimizer: torch.optim.Opti
             if s.grad is not None:
                 metrics[f"{prefix}/alpha_grad_norm"] = s.grad.data.float().norm().item()
         elif isinstance(module, SymmetricLoraQuantizer):
-            s = module._scale_param_storage
-            if s.grad is not None:
-                metrics[f"{prefix}/scale_grad_norm"] = s.grad.data.float().norm().item()
+            if hasattr(module, "_gamma"):
+                if module._gamma.grad is not None:
+                    metrics[f"{prefix}/gamma_grad_norm"] = module._gamma.grad.data.float().norm().item()
+            else:
+                s = module._scale_param_storage
+                if s.grad is not None:
+                    metrics[f"{prefix}/scale_grad_norm"] = s.grad.data.float().norm().item()
 
         # Learning rates
         for param_name, param in [("lora_A", module.lora_A), ("lora_B", module.lora_B)]:
@@ -352,7 +680,10 @@ def log_quantizer_stats(model: nn.Module, step: int, optimizer: torch.optim.Opti
             if lr_val is not None:
                 metrics[f"{prefix}/alpha_lr"] = lr_val
         elif isinstance(module, SymmetricLoraQuantizer):
-            lr_val = param_id_to_lr.get(id(module._scale_param_storage))
+            if hasattr(module, "_gamma"):
+                lr_val = param_id_to_lr.get(id(module._gamma))
+            else:
+                lr_val = param_id_to_lr.get(id(module._scale_param_storage))
             if lr_val is not None:
                 metrics[f"{prefix}/scale_lr"] = lr_val
 
@@ -409,10 +740,19 @@ def set_trainable(
                 elif isinstance(module, StretchedSymmetricLoraQuantizer):
                     module._alpha_param_storage.requires_grad = True
                 elif isinstance(module, SymmetricLoraQuantizer):
-                    module._scale_param_storage.requires_grad = True
-                params = module.get_trainable_params()
-                adapters = module.get_adapters()
-                scales_to_train.extend(param for name, param in params.items() if name not in adapters)
+                    if hasattr(module, "_gamma"):
+                        # Sigmoid reparameterization: train gamma via chain-rule backward hook.
+                        # _scale_param_storage must have requires_grad=True for the STE to
+                        # compute ∂L/∂s, which the backward hook chains to ∂L/∂γ.
+                        module._scale_param_storage.requires_grad = True
+                        module._gamma.requires_grad = True
+                        scales_to_train.append(module._gamma)
+                    else:
+                        module._scale_param_storage.requires_grad = True
+                if not (isinstance(module, SymmetricLoraQuantizer) and hasattr(module, "_gamma")):
+                    params = module.get_trainable_params()
+                    adapters = module.get_adapters()
+                    scales_to_train.extend(param for name, param in params.items() if name not in adapters)
 
     param_groups = []
     if train_lora:
@@ -677,6 +1017,63 @@ def get_argument_parser() -> argparse.ArgumentParser:
         "then run with --tune_bits 4 --init_ckpt <2bit_ckpt> to tune only 4-bit layers "
         "while keeping 2-bit layers frozen. Default: [2, 3, 4] (tune all).",
     )
+    parser.add_argument(
+        "--sigmoid_scale",
+        action="store_true",
+        help="Apply ApiQ-style sigmoid reparameterization to FQ scales: "
+        "scale = sigmoid(gamma) * scale_init. Constrains scale to (0, scale_init), "
+        "preventing explosion. Gamma initialized at 4.0 (sigmoid≈0.982). "
+        "More stable than direct scale training, especially with higher LRs.",
+    )
+
+    # ── Step-based streaming training (LR-QAT style: unique data per step) ──
+    parser.add_argument(
+        "--total_steps",
+        type=int,
+        default=None,
+        help="Total number of optimizer steps. When set, enables streaming mode: "
+        "pre-computes teacher hiddens for --num_train_samples into disk shards, "
+        "then streams through them for --total_steps steps (unique data each step, "
+        "cycling with reshuffle when pool is exhausted). "
+        "Epoch-based args (--constant_epochs, --cosine_epochs, etc.) are ignored.",
+    )
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=0,
+        help="Number of linear warmup steps (streaming mode only). 0 disables warmup.",
+    )
+    parser.add_argument(
+        "--constant_steps",
+        type=int,
+        default=0,
+        help="Number of constant-LR steps after warmup (streaming mode only). "
+        "Remaining steps after warmup + constant use cosine annealing.",
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        nargs="+",
+        default=[500, 1000, 2000, 5000, 10000],
+        help="Step numbers at which to save a checkpoint (streaming mode only). "
+        "The final step always saves regardless of this list.",
+    )
+    parser.add_argument(
+        "--shard_size",
+        type=int,
+        default=512,
+        help="Number of samples per shard file for sharded hiddens (streaming mode only). "
+        "Smaller = less RAM but more disk I/O. Default: 512.",
+    )
+    parser.add_argument(
+        "--hiddens_dir",
+        type=str,
+        default=None,
+        help="Path to a directory with pre-computed sharded teacher hiddens. "
+        "If provided, skips hiddens precomputation and reuses the shards from this path. "
+        "Useful for re-running experiments with different hyperparameters without "
+        "recomputing teacher hiddens (e.g. from a previous run's output_dir/hiddens_shards).",
+    )
     return parser
 
 
@@ -719,10 +1116,6 @@ def _main_impl(args) -> int:
         backup_mode=nncf.BackupMode.INT8_SYM,
         scale_estimation=not args.basic_init,
         compression_format=CompressionFormat[args.compression_format],
-        # ignored_scope=nncf.IgnoredScope(patterns=[r"(?!.*5.mlp.gate_proj.*).*"]),
-        # ignored_scope=nncf.IgnoredScope(
-        #     patterns=[r"(?!model/mlp/(gate_proj|up_proj)/linear/5$|model/self_attn/(k_proj|q_proj|o_proj)/linear/5$).*"]
-        # ),
     )
     pprint({"CLI arguments": vars(args), "Major compression parameters": compression_config})
     compression_config["advanced_parameters"] = AdvancedCompressionParameters(
@@ -733,7 +1126,11 @@ def _main_impl(args) -> int:
     # Configure output and log files.
     output_dir = Path(args.output_dir)
     last_dir = output_dir / "last"
-    shutil.rmtree(last_dir, ignore_errors=True)
+    streaming_mode = args.total_steps is not None
+    if not streaming_mode:
+        # Epoch-based mode: always start fresh.
+        shutil.rmtree(last_dir, ignore_errors=True)
+    # Streaming mode: keep last_dir intact so auto-resume can find existing checkpoints.
     for path in [output_dir, last_dir]:
         path.mkdir(exist_ok=True, parents=True)
     # Derive initial compression checkpoint path from format (or use explicit override).
@@ -759,77 +1156,89 @@ def _main_impl(args) -> int:
         print("  ** DEBUG MODE — results go to a separate database and experiment **")
     run_name = args.run_name or datetime.now().strftime("%Y-%m-%d__%H-%M-%S")
     with mlflow.start_run(run_name=run_name):
-        _train(args, compression_config, device, torch_dtype, last_dir, output_dir, ckpt_file, hidden_file)
+        if streaming_mode:
+            _train_streaming(args, compression_config, device, torch_dtype, last_dir, output_dir, ckpt_file)
+        else:
+            _train(args, compression_config, device, torch_dtype, last_dir, output_dir, ckpt_file, hidden_file)
 
         # Free GPU memory before loading checkpoints for stripping & evaluation.
-        # gc.collect()
-        # torch.cuda.synchronize()
-        # torch.cuda.empty_cache()
-        # torch.cuda.ipc_collect()
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
-        # # ── Build evaluation list: epoch 0 = init checkpoint, then trained epochs ──
-        # tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
-        # eval_checkpoints: list[tuple[int, Path]] = [(0, ckpt_file)]
-        # epoch_ckpts = sorted(
-        #     last_dir.glob("nncf_checkpoint_epoch*.pth"),
-        #     key=lambda p: int(p.stem.replace("nncf_checkpoint_epoch", "")),
-        # )
-        # for p in epoch_ckpts:
-        #     eval_checkpoints.append((int(p.stem.replace("nncf_checkpoint_epoch", "")), p))
+        # ── Build evaluation list: init checkpoint + trained checkpoints ──
+        tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
+        eval_checkpoints: list[tuple[int, Path]] = [(0, ckpt_file)]
+        if streaming_mode:
+            step_ckpts = sorted(
+                last_dir.glob("nncf_checkpoint_step*.pth"),
+                key=lambda p: int(p.stem.replace("nncf_checkpoint_step", "")),
+            )
+            for p in step_ckpts:
+                eval_checkpoints.append((int(p.stem.replace("nncf_checkpoint_step", "")), p))
+        else:
+            epoch_ckpts = sorted(
+                last_dir.glob("nncf_checkpoint_epoch*.pth"),
+                key=lambda p: int(p.stem.replace("nncf_checkpoint_epoch", "")),
+            )
+            for p in epoch_ckpts:
+                eval_checkpoints.append((int(p.stem.replace("nncf_checkpoint_epoch", "")), p))
 
-        # for epoch_num, ckpt_path in eval_checkpoints:
-        #     # Cache eval results only for epoch 0 (initial PTQ checkpoint) — reusable across runs.
-        #     # Trained epoch results are always re-evaluated (caching would be error-prone with tuning).
-        #     cache_file = ckpt_path.with_suffix(".eval.json") if epoch_num == 0 else None
-        #     if cache_file and cache_file.exists():
-        #         with open(cache_file) as f:
-        #             cached = json.load(f)
-        #         lambada_acc = cached["lambada_acc"]
-        #         lambada_ppl = cached["lambada_ppl"]
-        #         print(
-        #             f"Epoch {epoch_num} — cached from {cache_file.name}: acc={lambada_acc:.4f}, ppl={lambada_ppl:.4f}"
-        #         )
-        #     else:
-        #         stripped_dir = last_dir / "stripped"
-        #         print(f"\n{'=' * 60}")
-        #         print(f"Stripping & evaluating: {ckpt_path.name} (epoch {epoch_num})")
-        #         print(f"{'=' * 60}")
+        for ckpt_num, ckpt_path in eval_checkpoints:
+            # Cache eval results only for ckpt_num 0 (initial PTQ checkpoint) — reusable across runs.
+            # Trained checkpoints are always re-evaluated (caching would be error-prone with tuning).
+            cache_file = ckpt_path.with_suffix(".eval.json") if ckpt_num == 0 else None
+            if cache_file and cache_file.exists():
+                with open(cache_file) as f:
+                    cached = json.load(f)
+                lambada_acc = cached["lambada_acc"]
+                lambada_ppl = cached["lambada_ppl"]
+                print(
+                    f"Checkpoint {ckpt_num} — cached from {cache_file.name}: "
+                    f"acc={lambada_acc:.4f}, ppl={lambada_ppl:.4f}"
+                )
+            else:
+                stripped_dir = last_dir / "stripped"
+                print(f"\n{'=' * 60}")
+                print(f"Stripping & evaluating: {ckpt_path.name} (checkpoint {ckpt_num})")
+                print(f"{'=' * 60}")
 
-        #         model_to_strip = AutoModelForCausalLM.from_pretrained(
-        #             args.pretrained, torch_dtype=torch_dtype, device_map="cpu"
-        #         )
-        #         model_to_strip = load_checkpoint(model_to_strip, ckpt_path)
-        #         model_to_strip = nncf.strip(model_to_strip, strip_format=nncf.StripFormat.IN_PLACE)
-        #         if stripped_dir.exists():
-        #             shutil.rmtree(stripped_dir)
-        #         model_to_strip.save_pretrained(stripped_dir)
-        #         tokenizer.save_pretrained(stripped_dir)
-        #         del model_to_strip
-        #         gc.collect()
-        #         torch.cuda.empty_cache()
+                model_to_strip = AutoModelForCausalLM.from_pretrained(
+                    args.pretrained, torch_dtype=torch_dtype, device_map="cpu"
+                )
+                model_to_strip = load_checkpoint(model_to_strip, ckpt_path)
+                model_to_strip = nncf.strip(model_to_strip, strip_format=nncf.StripFormat.IN_PLACE)
+                if stripped_dir.exists():
+                    shutil.rmtree(stripped_dir)
+                model_to_strip.save_pretrained(stripped_dir)
+                tokenizer.save_pretrained(stripped_dir)
+                del model_to_strip
+                gc.collect()
+                torch.cuda.empty_cache()
 
-        #         eval_results = evaluate_with_vllm(
-        #             checkpoint_dir=stripped_dir,
-        #             tasks=["lambada_openai"],
-        #             tensor_parallel_size=2,
-        #             dtype="auto",
-        #             fewshot_as_multiturn=False,
-        #             cuda_devices="1,2",
-        #             apply_chat_template=False,
-        #             batch_size="auto",
-        #             limit=args.limit,
-        #         )
-        #         lambada_acc = eval_results["results"]["lambada_openai"]["acc,none"]
-        #         lambada_ppl = eval_results["results"]["lambada_openai"]["perplexity,none"]
-        #         if cache_file:
-        #             with open(cache_file, "w") as f:
-        #                 json.dump({"lambada_acc": lambada_acc, "lambada_ppl": lambada_ppl}, f, indent=2)
+                eval_results = evaluate_with_vllm(
+                    checkpoint_dir=stripped_dir,
+                    tasks=["lambada_openai"],
+                    tensor_parallel_size=2,
+                    dtype="auto",
+                    fewshot_as_multiturn=False,
+                    cuda_devices="1,2",
+                    apply_chat_template=False,
+                    batch_size="auto",
+                    limit=args.limit,
+                )
+                lambada_acc = eval_results["results"]["lambada_openai"]["acc,none"]
+                lambada_ppl = eval_results["results"]["lambada_openai"]["perplexity,none"]
+                if cache_file:
+                    with open(cache_file, "w") as f:
+                        json.dump({"lambada_acc": lambada_acc, "lambada_ppl": lambada_ppl}, f, indent=2)
 
-        #     mlflow.log_metrics(
-        #         {"lambada_acc": lambada_acc, "lambada_ppl": lambada_ppl},
-        #         step=epoch_num,
-        #     )
-        #     print(f"Epoch {epoch_num} — LAMBADA accuracy: {lambada_acc:.4f}, perplexity: {lambada_ppl:.4f}")
+            mlflow.log_metrics(
+                {"lambada_acc": lambada_acc, "lambada_ppl": lambada_ppl},
+                step=ckpt_num,
+            )
+            print(f"Checkpoint {ckpt_num} — LAMBADA accuracy: {lambada_acc:.4f}, perplexity: {lambada_ppl:.4f}")
 
     # del model
     # Export the best tuned model to OpenVINO and evaluate it using LM-Evaluation-Harness.
@@ -879,6 +1288,9 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
         save_checkpoint(model, ckpt_file, model_state=False)
         print(f"Saved init checkpoint: {ckpt_file}")
 
+    if args.sigmoid_scale:
+        apply_sigmoid_scale_reparam(model)
+
     # Enable gradient checkpointing to reduce activation memory.
     # ForwardWithHooks keeps FunctionHookMode alive across forward+backward so that
     # checkpoint recomputation sees the same FQ hooks as the original forward.
@@ -896,7 +1308,7 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
         fq_weight_decay=args.fq_weight_decay,
         tune_bits=args.tune_bits,
     )
-    opt = torch.optim.AdamW(param_to_train)
+    opt = torch.optim.AdamW(param_to_train, betas=(0.9, 0.95))
 
     # Run tuning with distillation loss and validation after each epoch.
     args.epochs = args.constant_epochs + args.cosine_epochs
@@ -1009,6 +1421,7 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
                 raise ValueError(err)
             (loss / grad_accumulation_steps).backward()
             if grad_steps == grad_accumulation_steps:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
                 scheduler.step()
                 aggregated_loss = loss_numerator / grad_steps
@@ -1022,6 +1435,258 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
         if finished_epoch in save_epochs or epoch == args.epochs - 1:
             ckpt_name = f"nncf_checkpoint_epoch{finished_epoch}.pth"
             save_checkpoint(model, last_dir / ckpt_name, model_state=False)
+
+
+def _train_streaming(args, compression_config, device, torch_dtype, last_dir, output_dir, ckpt_file):
+    """
+    Step-based streaming training (LR-QAT style).
+
+    Pre-computes teacher hiddens for a large pool of samples and saves them to disk shards.
+    Then streams through shards during training, so each optimizer step sees (mostly) unique data.
+    The pool is cycled through with reshuffling when exhausted.
+
+    Key differences from _train():
+    - No epoch concept — purely step-based (--total_steps).
+    - Teacher hiddens stored on disk in shards, loaded one shard at a time (~3 GB RAM).
+    - LR schedule specified directly in steps (--warmup_steps, --constant_steps).
+    - Much larger data pool without RAM/GPU OOM (limited only by disk space and precompute time).
+    """
+    # Load original model and tokenizer.
+    model = AutoModelForCausalLM.from_pretrained(args.pretrained, torch_dtype=torch_dtype, device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
+
+    # ── Prepare calibration data for compress_weights (small set, same as before) ──
+    if args.basic_init:
+        example_input = {k: v.to(device) for k, v in model.dummy_inputs.items()}
+        dataset = Dataset([example_input])
+    else:
+        load_fn = DATASET_LOADERS[args.dataset]
+        calib_loader = load_fn(num_samples=128, seqlen=128, tokenizer=tokenizer, device=device)
+        dataset = Dataset(map(get_model_input, calib_loader))
+
+    # ── Pre-compute sharded teacher hiddens ──
+    if args.hiddens_dir is not None:
+        hiddens_dir = Path(args.hiddens_dir)
+        if not (hiddens_dir / "_DONE").exists():
+            error = (
+                f"--hiddens_dir={hiddens_dir} does not contain a _DONE marker. "
+                "Make sure hiddens were fully pre-computed."
+            )
+            raise FileNotFoundError(error)
+        print(f"Reusing pre-computed hiddens from {hiddens_dir}")
+    else:
+        hiddens_dir = output_dir / "hiddens_shards"
+    done_marker = hiddens_dir / "_DONE"
+    if done_marker.exists():
+        print(f"Sharded hiddens already exist in {hiddens_dir}, skipping precompute.")
+    else:
+        print(f"Pre-computing teacher hiddens for {args.num_train_samples} samples (shard_size={args.shard_size})...")
+        # Collect training samples from the dataset.
+        load_fn = DATASET_LOADERS[args.dataset]
+        train_samples = load_fn(
+            num_samples=args.num_train_samples, seqlen=args.train_seqlen, tokenizer=tokenizer, device=device
+        )
+        num_shards = calc_hiddens_sharded(model, train_samples, hiddens_dir, shard_size=args.shard_size)
+        del train_samples
+        torch.cuda.empty_cache()
+        done_marker.touch()
+        print(f"Teacher hiddens: {num_shards} shards written to {hiddens_dir}")
+
+    # ── Auto-detect latest training checkpoint for resume ──
+    resume_step = 0
+    resume_training_state = None
+    total_training_steps = args.total_steps
+
+    # Scan last_dir for step checkpoints with step < total_steps.
+    step_ckpts = sorted(
+        last_dir.glob("nncf_checkpoint_step*.pth"),
+        key=lambda p: int(p.stem.replace("nncf_checkpoint_step", "")),
+    )
+    resume_ckpt_path = None
+    for p in reversed(step_ckpts):
+        step_num = int(p.stem.replace("nncf_checkpoint_step", ""))
+        if step_num < total_training_steps:
+            resume_ckpt_path = p
+            break
+
+    if resume_ckpt_path is not None:
+        print(f"Found training checkpoint: {resume_ckpt_path}")
+        resume_ckpt_data = torch.load(resume_ckpt_path, weights_only=False, map_location="cpu")
+        if "training_state" not in resume_ckpt_data:
+            print("  WARNING: checkpoint has no 'training_state' — cannot resume, starting fresh.")
+        else:
+            resume_training_state = resume_ckpt_data["training_state"]
+            resume_step = resume_training_state["step"]
+            print(f"  Will resume from step {resume_step}")
+        del resume_ckpt_data
+        model = load_checkpoint(model, resume_ckpt_path)
+    elif ckpt_file.exists():
+        print(f"Loading existing init checkpoint: {ckpt_file}")
+        model = load_checkpoint(model, ckpt_file)
+    else:
+        model = compress_weights(model, dataset=dataset, **compression_config)
+        save_checkpoint(model, ckpt_file, model_state=False)
+        print(f"Saved init checkpoint: {ckpt_file}")
+
+    if args.sigmoid_scale:
+        apply_sigmoid_scale_reparam(model)
+
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        print("Gradient checkpointing enabled (use_reentrant=False)")
+
+    param_to_train = set_trainable(
+        model,
+        lora_lr=args.lora_lr,
+        fq_lr=args.fq_lr,
+        lora_weight_decay=args.lora_weight_decay,
+        fq_weight_decay=args.fq_weight_decay,
+        tune_bits=args.tune_bits,
+    )
+    opt = torch.optim.AdamW(param_to_train, betas=(0.9, 0.95))
+
+    # ── LR schedule: warmup → constant → cosine (all in steps) ──
+    w_steps = args.warmup_steps
+    c_steps = args.constant_steps
+    cosine_steps = max(0, total_training_steps - w_steps - c_steps)
+
+    def _make_lr_lambda(warmup_steps: int, constant_steps: int, cosine_steps: int, min_lr_ratio: float):
+        def lr_lambda(step: int) -> float:
+            if warmup_steps > 0 and step < warmup_steps:
+                return step / warmup_steps
+            adjusted_step = step - warmup_steps
+            if adjusted_step < constant_steps:
+                return 1.0
+            if cosine_steps <= 0:
+                return 1.0
+            progress = (adjusted_step - constant_steps) / cosine_steps
+            return min_lr_ratio + (1.0 - min_lr_ratio) * (1.0 + math.cos(math.pi * progress)) / 2.0
+
+        return lr_lambda
+
+    scheduler = LambdaLR(opt, lr_lambda=_make_lr_lambda(w_steps, c_steps, cosine_steps, args.min_lr_ratio))
+
+    # ── Restore optimizer/scheduler state when resuming ──
+    if resume_training_state is not None:
+        opt.load_state_dict(resume_training_state["optimizer_state_dict"])
+        scheduler.load_state_dict(resume_training_state["scheduler_state_dict"])
+        del resume_training_state
+        print(f"Restored optimizer & scheduler state (resuming from step {resume_step})")
+
+    # ── Create streaming data loader ──
+    grad_accumulation_steps = args.batch_size // args.microbatch_size
+    shard_loader = StreamingShardLoader(hiddens_dir, args.microbatch_size, device, torch_dtype)
+
+    print(
+        f"Streaming training: {total_training_steps} steps, "
+        f"{shard_loader.total_samples} unique samples in pool, "
+        f"batch={args.batch_size}, microbatch={args.microbatch_size}, "
+        f"grad_accum={grad_accumulation_steps}.\n"
+        f"LR schedule: {w_steps} warmup → {c_steps} constant → {cosine_steps} cosine "
+        f"(min_lr_ratio={args.min_lr_ratio}).\n"
+        f"Samples per full pass: {shard_loader.total_samples}, "
+        f"steps per pass: {shard_loader.total_samples // args.batch_size}, "
+        f"expected passes: {total_training_steps * args.batch_size / max(1, shard_loader.total_samples):.1f}x."
+    )
+
+    # Log all meaningful parameters to MLflow.
+    mlflow.log_params(
+        {
+            "pretrained": args.pretrained,
+            "lora_rank": args.lora_rank,
+            "basic_init": args.basic_init,
+            "num_train_samples": args.num_train_samples,
+            "train_seqlen": args.train_seqlen,
+            "fq_lr": args.fq_lr,
+            "lora_lr": args.lora_lr,
+            "weight_decay_lora": args.lora_weight_decay,
+            "weight_decay_fq": args.fq_weight_decay,
+            "batch_size": args.batch_size,
+            "microbatch_size": args.microbatch_size,
+            "grad_accumulation_steps": grad_accumulation_steps,
+            "total_training_steps": total_training_steps,
+            "warmup_steps": w_steps,
+            "constant_steps": c_steps,
+            "cosine_steps": cosine_steps,
+            "min_lr_ratio": args.min_lr_ratio,
+            "compression_mode": str(compression_config["mode"]),
+            "group_size": compression_config["group_size"],
+            "compression_format": str(compression_config["compression_format"]),
+            "awq": compression_config["awq"],
+            "scale_estimation": compression_config["scale_estimation"],
+            "use_autograd_quantize": args.use_autograd_quantize,
+            "gradient_checkpointing": args.gradient_checkpointing,
+            "tune_bits": args.tune_bits,
+            "dataset": args.dataset,
+            "streaming_mode": True,
+            "shard_size": args.shard_size,
+            "total_unique_samples": shard_loader.total_samples,
+        }
+    )
+
+    # ── Training loop ──
+    aggregated_loss = float("nan")
+    loss_numerator = grad_steps = 0
+    total_steps = resume_step
+    save_step_set = set(args.save_steps)
+    data_iter = iter(shard_loader)
+    remaining_microbatches = (total_training_steps - resume_step) * grad_accumulation_steps
+
+    if resume_step > 0:
+        print(f"Resuming training from step {resume_step} ({remaining_microbatches} microbatches remaining)")
+
+    for microbatch_idx in track(range(remaining_microbatches), description="Training"):
+        input_ids, teacher_hiddens = next(data_iter)
+
+        # Compute teacher targets via lm_head (same as epoch-based training).
+        model_input = get_model_input(input_ids)
+        with torch.no_grad():
+            targets = model.lm_head(teacher_hiddens)
+            if hasattr(model.config, "final_logit_softcapping"):
+                fls = model.config.final_logit_softcapping
+                if fls is not None:
+                    targets = targets / fls
+                    targets = torch.tanh(targets)
+                    targets = targets * fls
+
+        outputs = model(**model_input).logits
+        loss = kl_div(outputs, targets.to(dtype=torch_dtype, device=device))
+
+        loss_numerator += loss.item()
+        grad_steps += 1
+        if not torch.isfinite(loss).item():
+            err = f"Fine-tuning loss is {loss}"
+            raise ValueError(err)
+        (loss / grad_accumulation_steps).backward()
+
+        if grad_steps == grad_accumulation_steps:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            opt.step()
+            scheduler.step()
+            aggregated_loss = loss_numerator / grad_steps
+            loss_numerator = grad_steps = 0
+            total_steps += 1
+            mlflow.log_metric("loss", aggregated_loss, step=total_steps)
+            log_quantizer_stats(model, total_steps, opt)
+            opt.zero_grad()
+
+            # Save checkpoint at scheduled steps (includes optimizer/scheduler for resume).
+            if total_steps in save_step_set or total_steps == total_training_steps:
+                ckpt_name = f"nncf_checkpoint_step{total_steps}.pth"
+                ckpt_path = last_dir / ckpt_name
+                save_checkpoint(model, ckpt_path, model_state=False)
+                # Append training state for resume support.
+                ckpt_data = torch.load(ckpt_path, weights_only=False, map_location="cpu")
+                ckpt_data["training_state"] = {
+                    "step": total_steps,
+                    "optimizer_state_dict": opt.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                }
+                torch.save(ckpt_data, ckpt_path)
+                print(f"  [step {total_steps}] saved {ckpt_name}, loss={aggregated_loss:.6f}")
+
+            if total_steps >= total_training_steps:
+                break
 
 
 if __name__ == "__main__":
