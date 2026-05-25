@@ -59,6 +59,102 @@ from nncf.torch.quantization.quantize_functions import set_use_autograd_quantize
 warnings.filterwarnings("ignore", category=TracerWarning)
 
 
+# ---------------------------------------------------------------------- #
+# MLP equalization (down_proj input scale absorbed into up_proj/gate_proj)
+# ---------------------------------------------------------------------- #
+def _find_mlp_groups(model: nn.Module) -> list[tuple[nn.Module, nn.Linear, list[nn.Linear]]]:
+    """
+    Collect ``(parent, down_proj, [producers])`` triples where ``producers``
+    are the sibling linears whose outputs are consumed by ``down_proj`` along
+    its input-channel dimension.
+    """
+    groups: list[tuple[nn.Module, nn.Linear, list[nn.Linear]]] = []
+    for parent in model.modules():
+        down = getattr(parent, "down_proj", None)
+        if not isinstance(down, nn.Linear):
+            continue
+        producers: list[nn.Linear] = []
+        for attr in ("up_proj",):
+            sib = getattr(parent, attr, None)
+            if isinstance(sib, nn.Linear) and sib.out_features == down.in_features:
+                producers.append(sib)
+        if producers:
+            groups.append((parent, down, producers))
+    return groups
+
+
+def _find_up_gate_groups(model: nn.Module) -> list[tuple[nn.Module, nn.Linear, list[nn.Linear]]]:
+    """
+    Collect ``(up, gate, producer)`` triples for absorbing input scale into LayerNorm.
+    """
+    groups: list[tuple[nn.Module, nn.Linear, list[nn.Linear]]] = []
+    for parent in model.modules():
+        if not hasattr(parent, "mlp"):
+            continue
+        mlp = getattr(parent, "mlp")
+        gate = getattr(mlp, "gate_proj", None)
+        if not isinstance(gate, nn.Linear):
+            continue
+        up = getattr(mlp, "up_proj", None)
+        if not isinstance(up, nn.Linear):
+            continue
+        producer = None
+        for attr in ("post_attention_layernorm",):
+            sib = getattr(parent, attr, None)
+            producer = sib
+        if producer:
+            groups.append((up, gate, producer))
+    return groups
+
+
+@torch.no_grad()
+def equalize_up_gate_with_layernorm(model: nn.Module, eps: float = 1e-5) -> int:
+    groups = _find_up_gate_groups(model)
+    if not groups:
+        return 0
+    n_done = 0
+    for up, gate, producer in groups:
+        s_gate = gate.weight.abs().mean(dim=0).clamp_min(eps).to(device=gate.weight.device, dtype=gate.weight.dtype)
+        s_up = up.weight.abs().mean(dim=0).clamp_min(eps).to(device=up.weight.device, dtype=up.weight.dtype)
+        s_gate = s_gate / s_gate.norm(p=2, dim=0, keepdim=True)
+        s_up = s_up / s_up.norm(p=2, dim=0, keepdim=True)
+        s = 0.1 * s_gate + 0.9 * s_up
+        gate.weight.mul_(1.0 / s.unsqueeze(0))
+        up.weight.mul_(1.0 / s.unsqueeze(0))
+        s_dev = s.to(device=producer.weight.device, dtype=producer.weight.dtype)
+        producer.weight.mul_(s_dev)
+        if hasattr(producer, "bias") and producer.bias is not None:
+            producer.bias.mul_(s_dev)
+        n_done += 1
+    return n_done
+
+
+@torch.no_grad()
+def equalize_down_proj(
+    model: nn.Module,
+    calib_inputs: list,
+    eps: float = 1e-5,
+) -> int:
+    """
+    Equalize each ``down_proj`` layer by absorbing the per-input-channel
+    weight magnitude into its producers (``up_proj`` and, when present, ``gate_proj``).
+    """
+    groups = _find_mlp_groups(model)
+    if not groups:
+        return 0
+    n_done = 0
+    for _, down, producers in groups:
+        s = down.weight.abs().mean(dim=0).clamp_min(eps).to(device=down.weight.device, dtype=down.weight.dtype)
+        down.weight.mul_(1.0 / s.unsqueeze(0))
+        for prod in producers:
+            s_dev = s.to(device=prod.weight.device, dtype=prod.weight.dtype)
+            prod.weight.mul_(s_dev.unsqueeze(1))
+            if prod.bias is not None:
+                prod.bias.mul_(s_dev)
+        n_done += 1
+    return n_done
+
+
 def get_wikitext2(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device) -> list[Tensor]:
     """
     Loads and processes the Wikitext-2 dataset for training.
@@ -250,7 +346,8 @@ def get_model_input(input_ids: Tensor) -> dict[str, Tensor]:
     """
     attention_mask = torch.ones_like(input_ids)
     position_ids = torch.cumsum(attention_mask, axis=1) - 1
-    return {"input_ids": input_ids, "attention_mask": attention_mask, "position_ids": position_ids}
+    token_type_ids = torch.zeros_like(input_ids)
+    return {"input_ids": input_ids, "attention_mask": attention_mask, "position_ids": position_ids, "token_type_ids": token_type_ids}
 
 
 def kl_div(student_hiddens: torch.Tensor, teacher_hiddens: torch.Tensor) -> torch.Tensor:
@@ -612,7 +709,7 @@ def get_argument_parser() -> argparse.ArgumentParser:
         "--save_epochs",
         type=int,
         nargs="+",
-        default=[1, 2, 5, 10, 15],
+        default=[1, 5, 10, 15],
         help="Epoch numbers (0-indexed) at which to save a checkpoint. "
         "Epoch 0 means after initialization (before any training). "
         "The last epoch always saves regardless of this list.",
@@ -676,6 +773,12 @@ def get_argument_parser() -> argparse.ArgumentParser:
         "first run with --tune_bits 2 to tune only 2-bit layers, "
         "then run with --tune_bits 4 --init_ckpt <2bit_ckpt> to tune only 4-bit layers "
         "while keeping 2-bit layers frozen. Default: [2, 3, 4] (tune all).",
+    )
+    parser.add_argument(
+        "--equalize_down_proj",
+        action="store_true",
+        help="Absorb per-input-channel weight magnitude of down_proj into up_proj/gate_proj "
+        "before quantization (SmoothQuant-style equalization).",
     )
     return parser
 
@@ -875,8 +978,19 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
         print(f"Loading existing init checkpoint: {ckpt_file}")
         model = load_checkpoint(model, ckpt_file)
     else:
+        if args.equalize_down_proj:
+            n_eq = equalize_down_proj(model, [])
+            print(f"Equalized {n_eq} down_proj layers.")
+            # NOTE: equalize_up_gate_with_layernorm is intentionally disabled.
+            # Normalizing s to unit L2 norm produces values ~1/sqrt(hidden_size) ≈ 0.017,
+            # which scales gate/up weights ~60× larger and destroys INT3 quantization quality.
+            n_eq = equalize_up_gate_with_layernorm(model)
+            # print(f"Equalized {n_eq} up_proj/gate_proj layers with preceding LayerNorm.")
         model = compress_weights(model, dataset=dataset, **compression_config)
-        save_checkpoint(model, ckpt_file, model_state=False)
+        # Save model_state=True when equalization is used because equalize_down_proj
+        # modifies base weights in-place; save_stripped.py must restore those modified
+        # weights, not the original pretrained weights.
+        save_checkpoint(model, ckpt_file, model_state=args.equalize_down_proj)
         print(f"Saved init checkpoint: {ckpt_file}")
 
     # Enable gradient checkpointing to reduce activation memory.
@@ -1021,7 +1135,7 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
         finished_epoch = epoch + 1
         if finished_epoch in save_epochs or epoch == args.epochs - 1:
             ckpt_name = f"nncf_checkpoint_epoch{finished_epoch}.pth"
-            save_checkpoint(model, last_dir / ckpt_name, model_state=False)
+            save_checkpoint(model, last_dir / ckpt_name, model_state=args.equalize_down_proj)
 
 
 if __name__ == "__main__":

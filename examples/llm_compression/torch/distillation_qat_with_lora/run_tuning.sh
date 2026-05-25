@@ -22,22 +22,28 @@ set -euo pipefail
 #   1e-5   1e-3     1e-3   1e-4     0       0         15
 # ────────────────────────────────────────────────────────────────────
 
-# PRETRAINED="meta-llama/Llama-3.2-1B-Instruct"
-PRETRAINED="Qwen/Qwen3-4B"
-OUTPUT_DIR="output"
-LOG_FILE="grid_search.log"
+# PRETRAINED="meta-llama/Llama-3.2-3B-Instruct"
+# PRETRAINED="Qwen/Qwen3-1.7B"
+PRETRAINED="google/gemma-3-4b-it"
+OUTPUT_DIR="output_gemma3_4b_gs64_minmax"
+LOG_FILE="grid_search_gemma3_4b_gs64_minmax.log"
 CONFIGS_FILE=""
 DEBUG_FLAG=""
 COMPRESSION_FORMAT="FQ_LORA"
+# COMPRESSION_FORMAT="FQ_STRETCHED_LORA"
 USE_AUTOGRAD_QUANTIZE=""
 GRADIENT_CHECKPOINTING=""
-SE_INIT=true
+SE_INIT=""
+# SE_INIT=true
 INIT_CKPT=""
 LORA_RANK=256
-NUM_TRAIN_SAMPLES=1024
+NUM_TRAIN_SAMPLES=2048
+# NUM_TRAIN_SAMPLES=1024
 TRAIN_SEQLEN=1024
 BATCH_SIZE=32
 DATASET="pile"
+# EQUALIZE_DOWN_PROJ=""
+EQUALIZE_DOWN_PROJ="--equalize_down_proj"
 
 # ── Parse CLI arguments ─────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -57,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --train_seqlen) TRAIN_SEQLEN="$2"; shift 2 ;;
         --batch_size) BATCH_SIZE="$2"; shift 2 ;;
         --dataset) DATASET="$2"; shift 2 ;;
+        --equalize_down_proj) EQUALIZE_DOWN_PROJ="--equalize_down_proj"; shift ;;
         -h|--help)
             sed -n '3,18p' "$0"
             exit 0 ;;
@@ -145,6 +152,7 @@ run_config() {
         $BASIC_INIT_FLAG \
         $USE_AUTOGRAD_QUANTIZE \
         $GRADIENT_CHECKPOINTING \
+        $EQUALIZE_DOWN_PROJ \
         ${INIT_CKPT:+--init_ckpt "$INIT_CKPT"} \
         $DEBUG_FLAG \
         >> "$LOG_FILE" 2>&1; then
