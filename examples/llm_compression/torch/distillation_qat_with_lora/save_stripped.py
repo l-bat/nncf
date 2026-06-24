@@ -14,7 +14,9 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from transformers import AutoConfig
 from transformers import AutoModelForCausalLM
+from transformers import AutoProcessor
 from transformers import AutoTokenizer
 
 import nncf
@@ -81,16 +83,35 @@ def main(argv) -> float:
         msg = f"not found checkpoint: {ckpt_file}"
         raise FileNotFoundError(msg)
     print(f"Processing checkpoint: {ckpt_file}")
-    tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
     save_dir = Path(args.output_dir)
     if not save_dir.exists():
         save_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(save_dir)
+    # Use AutoProcessor for multimodal models (e.g. Gemma3) so that
+    # preprocessor_config.json is included in the saved directory.
+    # Fall back to AutoTokenizer for text-only models.
+    try:
+        processor = AutoProcessor.from_pretrained(args.pretrained)
+        processor.save_pretrained(save_dir)
+    except Exception:
+        tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
+        tokenizer.save_pretrained(save_dir)
 
     model = AutoModelForCausalLM.from_pretrained(args.pretrained, device_map="cpu")
     model = load_checkpoint(model, ckpt_file)
     model = nncf.strip(model, strip_format=nncf.StripFormat.IN_PLACE)
     model.save_pretrained(save_dir)
+    # For multimodal models (e.g. Qwen3.6-35B-A3B), AutoModelForCausalLM saves only
+    # the text sub-config (Qwen3_5MoeTextConfig) which vLLM rejects with TypeError.
+    # Overwrite config.json with the full top-level config (Qwen3_5MoeConfig) so
+    # vLLM can load the directory.  Use language_model_only=True in eval model_args
+    # to skip loading vision-encoder weights (only text weights are present here).
+    orig_config = AutoConfig.from_pretrained(args.pretrained)
+    if type(orig_config) is not type(model.config):
+        orig_config.save_pretrained(save_dir)
+        print(
+            f"Overwrote text config ({type(model.config).__name__}) with full model "
+            f"config ({type(orig_config).__name__}) for vLLM compatibility."
+        )
     print(f"Saved stripped model to: {save_dir}")
 
 

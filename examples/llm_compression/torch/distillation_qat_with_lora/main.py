@@ -49,7 +49,9 @@ from nncf.parameters import CompressWeightsMode
 from nncf.quantization.advanced_parameters import AdvancedAWQParameters
 from nncf.quantization.advanced_parameters import AdvancedCompressionParameters
 from nncf.quantization.quantize_model import compress_weights
+from nncf.torch.function_hook.hook_executor_mode import FunctionHookMode
 from nncf.torch.function_hook.wrapper import get_hook_storage
+from torch.overrides import _get_current_function_mode_stack
 from nncf.torch.model_creation import load_from_config
 from nncf.torch.quantization.layers import AsymmetricLoraQuantizer
 from nncf.torch.quantization.layers import StretchedSymmetricLoraQuantizer
@@ -58,15 +60,19 @@ from nncf.torch.quantization.quantize_functions import set_use_autograd_quantize
 
 warnings.filterwarnings("ignore", category=TracerWarning)
 
-
 # ---------------------------------------------------------------------- #
-# MLP equalization (down_proj input scale absorbed into up_proj/gate_proj)
+# MLP equalization (average up_proj/gate_proj input scale absorbed into layer norm weights)
 # ---------------------------------------------------------------------- #
 def _find_mlp_groups(model: nn.Module) -> list[tuple[nn.Module, nn.Linear, list[nn.Linear]]]:
     """
     Collect ``(parent, down_proj, [producers])`` triples where ``producers``
     are the sibling linears whose outputs are consumed by ``down_proj`` along
     its input-channel dimension.
+
+    Recognized layouts:
+      * Llama-style: ``down_proj`` consumes ``up_proj`` * SiLU(``gate_proj``);
+        producers = ``[up_proj, gate_proj]``.
+      * Generic: only ``up_proj`` present -> producers = ``[up_proj]``.
     """
     groups: list[tuple[nn.Module, nn.Linear, list[nn.Linear]]] = []
     for parent in model.modules():
@@ -85,7 +91,14 @@ def _find_mlp_groups(model: nn.Module) -> list[tuple[nn.Module, nn.Linear, list[
 
 def _find_up_gate_groups(model: nn.Module) -> list[tuple[nn.Module, nn.Linear, list[nn.Linear]]]:
     """
-    Collect ``(up, gate, producer)`` triples for absorbing input scale into LayerNorm.
+    Collect ``(parent, down_proj, [producers])`` triples where ``producers``
+    are the sibling linears whose outputs are consumed by ``down_proj`` along
+    its input-channel dimension.
+
+    Recognized layouts:
+      * Llama-style: ``down_proj`` consumes ``up_proj`` * SiLU(``gate_proj``);
+        producers = ``[up_proj, gate_proj]``.
+      * Generic: only ``up_proj`` present -> producers = ``[up_proj]``.
     """
     groups: list[tuple[nn.Module, nn.Linear, list[nn.Linear]]] = []
     for parent in model.modules():
@@ -95,34 +108,73 @@ def _find_up_gate_groups(model: nn.Module) -> list[tuple[nn.Module, nn.Linear, l
         gate = getattr(mlp, "gate_proj", None)
         if not isinstance(gate, nn.Linear):
             continue
+
         up = getattr(mlp, "up_proj", None)
         if not isinstance(up, nn.Linear):
             continue
+
+        # Identify the LayerNorm whose output is the direct input to gate_proj / up_proj.
+        # Check Gemma3-style first (pre_feedforward_layernorm), then fall back to
+        # Llama/Qwen-style (post_attention_layernorm).
         producer = None
-        for attr in ("post_attention_layernorm",):
+        for attr in ("pre_feedforward_layernorm", "post_attention_layernorm"):
             sib = getattr(parent, attr, None)
-            producer = sib
+            if sib is not None:
+                producer = sib
+                break
+
         if producer:
             groups.append((up, gate, producer))
     return groups
 
+# rescale scale to [min, max] to avoid extreme values that cause instability during training or quantization
+def align_scale(s: Tensor, min=0.1, max=1.0) -> Tensor:
+    min_s = s.min()
+    max_s = s.max()
+    if max_s - min_s < 1e-5:
+        return torch.clamp(s, min=min, max=max)
+    s = (s - min_s) / (max_s - min_s) * (max - min) + min
+    return s
+
 
 @torch.no_grad()
-def equalize_up_gate_with_layernorm(model: nn.Module, eps: float = 1e-5) -> int:
+def equalize_up_gate_with_layernorm(model: nn.Module, eps: float = 1e-5, use_align_scale: bool = True) -> int:
     groups = _find_up_gate_groups(model)
     if not groups:
         return 0
+
     n_done = 0
     for up, gate, producer in groups:
         s_gate = gate.weight.abs().mean(dim=0).clamp_min(eps).to(device=gate.weight.device, dtype=gate.weight.dtype)
         s_up = up.weight.abs().mean(dim=0).clamp_min(eps).to(device=up.weight.device, dtype=up.weight.dtype)
+
         s_gate = s_gate / s_gate.norm(p=2, dim=0, keepdim=True)
         s_up = s_up / s_up.norm(p=2, dim=0, keepdim=True)
+
+        # up_proj theoretically more sensitive to quantization
         s = 0.1 * s_gate + 0.9 * s_up
+        if use_align_scale:
+            s = align_scale(s, min=0.1, max=1.0)
+        # Divide down_proj input columns by s.
+        print("Max val before equalization gate:", gate.weight.abs().max().item())
+        print("Max val before equalization up:", up.weight.abs().max().item())
         gate.weight.mul_(1.0 / s.unsqueeze(0))
         up.weight.mul_(1.0 / s.unsqueeze(0))
+        print("Max val after equalization gate:", gate.weight.abs().max().item())
+        print("Max val after equalization up:", up.weight.abs().max().item())
+
+        # Scale producer (LayerNorm/RMSNorm) so its output is multiplied by s.
         s_dev = s.to(device=producer.weight.device, dtype=producer.weight.dtype)
-        producer.weight.mul_(s_dev)
+        # Gemma3 uses (1 + weight) RMSNorm (weight initialized to zeros):
+        #   effective multiplier = (1 + weight)
+        #   to scale output by s: (1 + w_new) = s*(1 + w_old)  →  w_new = s*(1+w_old) - 1
+        # Standard RMSNorm (e.g. Llama) uses weight*x (weight initialized to ones):
+        #   effective multiplier = weight
+        #   to scale output by s: w_new = s * w_old
+        if "gemma" in type(producer).__name__.lower():
+            producer.weight.data = s_dev * (1.0 + producer.weight.data) - 1.0
+        else:
+            producer.weight.data.mul_(s_dev)
         if hasattr(producer, "bias") and producer.bias is not None:
             producer.bias.mul_(s_dev)
         n_done += 1
@@ -132,20 +184,51 @@ def equalize_up_gate_with_layernorm(model: nn.Module, eps: float = 1e-5) -> int:
 @torch.no_grad()
 def equalize_down_proj(
     model: nn.Module,
-    calib_inputs: list,
+    calib_inputs: list[Tensor],
     eps: float = 1e-5,
+    use_align_scale: bool = True,
 ) -> int:
     """
     Equalize each ``down_proj`` layer by absorbing the per-input-channel
-    weight magnitude into its producers (``up_proj`` and, when present, ``gate_proj``).
+    activation magnitude into its producers (``up_proj`` and, when present,
+    ``gate_proj``).
+
+    For every MLP block let ``s = mean(|x|, dim=batch_seq)`` measured at the
+    input of ``down_proj`` over the calibration set. Then:
+
+    * ``down_proj.weight  /= s[None, :]`` (divide along input channels)
+    * For each producer ``L`` (e.g. ``up_proj``, ``gate_proj``):
+      ``L.weight *= s[:, None]``  (scale output channels)
+      ``L.bias   *= s``           (if a bias exists)
+
+    Mathematically, ``down(up(x) * silu(gate(x))) = down((up(x)*s) * (silu(gate(x)*s)/s))``
+    is *not* exact for the SiLU branch in general, but in practice this
+    pre-quantization equalization (cf. SmoothQuant / AWQ) significantly
+    flattens the weight magnitudes seen by the per-group quantizer. The
+    transformation is exact when no SiLU is present (``producers == [up_proj]``).
+
+    :param model: Model whose MLP blocks expose ``down_proj`` (and optional
+        ``up_proj``/``gate_proj`` siblings) as direct attributes. Must be
+        called on plain ``nn.Linear`` layers (i.e. **before** wrapping them
+        with :class:`QuantizedLoraLinear`).
+    :param calib_inputs: Token-id tensors used for activation statistics.
+    :param eps: Lower bound for ``s`` to avoid division by zero.
+    :return: Number of equalized MLP groups.
     """
     groups = _find_mlp_groups(model)
     if not groups:
         return 0
+
     n_done = 0
     for _, down, producers in groups:
         s = down.weight.abs().mean(dim=0).clamp_min(eps).to(device=down.weight.device, dtype=down.weight.dtype)
+        if use_align_scale:
+            s = align_scale(s, min=0.1, max=1.0)
+        print("Max val before equalization:", down.weight.abs().max().item())
         down.weight.mul_(1.0 / s.unsqueeze(0))
+        print("Max val after equalization:", down.weight.abs().max().item())
+
+        # Scale producer output rows by s.
         for prod in producers:
             s_dev = s.to(device=prod.weight.device, dtype=prod.weight.dtype)
             prod.weight.mul_(s_dev.unsqueeze(1))
@@ -154,6 +237,31 @@ def equalize_down_proj(
         n_done += 1
     return n_done
 
+def _log_dataset_size(name: str, found: int, requested: int) -> None:
+    if found < requested:
+        print(f"[dataset] {name}: {found} unique samples pass the seqlen filter (requested {requested})")
+    else:
+        print(f"[dataset] {name}: {found} samples will be used for tuning")
+
+
+def get_slimpajama(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device):
+    ds = load_dataset("DKYoon/SlimPajama-6B", split="train")
+    trainloader = []
+    for example in ds:
+        trainenc = tokenizer(example["text"], return_tensors="pt")
+        if trainenc.input_ids.shape[1] < seqlen:
+            continue
+        if trainenc.input_ids.shape[1] > seqlen + 1:
+            i = torch.randint(0, trainenc.input_ids.shape[1] - seqlen - 1, (1,)).item()
+        else:
+            i = 0
+        j = i + seqlen
+        inp = trainenc.input_ids[:, i:j].to(device)
+        trainloader.append(inp)
+        if len(trainloader) >= num_samples:
+            break
+    _log_dataset_size("slimpajama", len(trainloader), num_samples)
+    return trainloader
 
 def get_wikitext2(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device) -> list[Tensor]:
     """
@@ -207,6 +315,7 @@ def get_pile(num_samples: int, seqlen: int, tokenizer: Any, device: torch.device
 DATASET_LOADERS = {
     "pile": get_pile,
     "wikitext": get_wikitext2,
+    "slimpajama": get_slimpajama,
 }
 
 
@@ -775,10 +884,17 @@ def get_argument_parser() -> argparse.ArgumentParser:
         "while keeping 2-bit layers frozen. Default: [2, 3, 4] (tune all).",
     )
     parser.add_argument(
-        "--equalize_down_proj",
+        "--equalize_scales",
         action="store_true",
-        help="Absorb per-input-channel weight magnitude of down_proj into up_proj/gate_proj "
-        "before quantization (SmoothQuant-style equalization).",
+        help="Apply SmoothQuant-style MLP equalization before quantization: "
+        "absorbs per-channel weight magnitude of down_proj into up_proj (weight-based), "
+        "and absorbs the average up_proj/gate_proj input scale into the preceding LayerNorm.",
+    )
+    parser.add_argument(
+        "--align_scale",
+        action="store_true",
+        help="Rescale equalization scales to [0.1, 1.0] via align_scale() before applying. "
+        "Only has effect when --equalize_scales is also set.",
     )
     return parser
 
@@ -828,6 +944,11 @@ def _main_impl(args) -> int:
         # ),
     )
     pprint({"CLI arguments": vars(args), "Major compression parameters": compression_config})
+    # Exclude only the tiny DeltaNet QK/state projections from INT3+LoRA.
+    # compression_config["ignored_scope"] = nncf.IgnoredScope(
+    #     # patterns=[r".*in_proj_[abz].*"], #  Qwen/Qwen3.6-27B
+    #     patterns=[".*in_proj_a.*", ".*in_proj_b.*", ".*shared_expert_gate.*"],  # Qwen/Qwen3.6-35B-A3B
+    # )
     compression_config["advanced_parameters"] = AdvancedCompressionParameters(
         awq_params=AdvancedAWQParameters(prefer_data_aware_scaling=not args.basic_init),
         # scale_estimation_params=AdvancedScaleEstimationParameters(subset_size=-1, initial_steps=10, scale_steps=10),
@@ -948,6 +1069,90 @@ def _main_impl(args) -> int:
     return 0
 
 
+def _install_fhm_checkpointing_fix(model: nn.Module) -> int:
+    """
+    Wrap every gradient-checkpointing function in the model so that the active
+    FunctionHookMode (NNCF weight-quantisation hooks) is restored during the
+    backward recomputation pass.
+
+    Root cause:
+      TorchFunctionMode *always* deactivates itself from the C++ dispatch stack
+      before calling func(*args, **kwargs) inside __torch_function__, to prevent
+      infinite recursion.  This happens for every torch function including
+      loss.backward() and torch.autograd.backward().  Consequently,
+      CheckpointFunction.backward's recomputation runs without FunctionHookMode:
+      quantiser hooks don't fire, lora_A/lora_B are absent from the autograd
+      graph, and their .grad stays None forever.
+
+    Fix:
+      Replace each module's gradient_checkpointing_func with a closure that
+      (a) captures the active FunctionHookMode when checkpoint() is first called
+          during forward — at that point the mode IS on the stack because
+          checkpoint() itself is a plain Python call, not a torch dispatch;
+      (b) wraps the checkpointed function so that during backward recomputation
+          FHM is re-entered via __enter__/__exit__ — this pushes FHM onto the
+          torch function mode stack AND re-installs the _call_impl patches that
+          populate module_call_stack, which is required by
+          get_current_relative_name().
+
+    :param model: The NNCF-wrapped model after gradient_checkpointing_enable().
+    :return: Number of patched modules.
+    """
+    n_patched = 0
+    for module in model.modules():
+        orig_fn = getattr(module, "_gradient_checkpointing_func", None)
+        if orig_fn is None:
+            continue
+
+        def _make_fhm_aware(orig):
+            def fhm_aware_ckpt(function, *args, **kwargs):
+                # Capture the active FunctionHookMode at forward time.
+                # checkpoint() is a plain Python call → mode is on the stack here.
+                try:
+                    stack = _get_current_function_mode_stack()
+                    fhm = next((m for m in reversed(stack) if isinstance(m, FunctionHookMode)), None)
+                except Exception:
+                    fhm = None
+
+                if fhm is None:
+                    return orig(function, *args, **kwargs)
+
+                def function_with_fhm(*a, **kw):
+                    # This closure is called TWICE per checkpointed segment:
+                    #   1. During FORWARD — to compute activations and save tensors.
+                    #      At this point fhm_forward is already on the C++ stack
+                    #      (we are still inside ForwardWithHooks.__call__).
+                    #      → Just delegate to function(); no second FHM needed.
+                    #   2. During BACKWARD recomputation — to rebuild the autograd graph.
+                    #      At this point TorchFunctionMode has deactivated FHM (it pops
+                    #      itself before calling func() to prevent infinite recursion),
+                    #      so the stack is empty of FunctionHookMode instances.
+                    #      → Create a fresh FHM (clean op_calls so hook names start at
+                    #        /0 again) and run the forward inside it.
+                    try:
+                        cur_stack = _get_current_function_mode_stack()
+                        fhm_active = any(isinstance(m, FunctionHookMode) for m in cur_stack)
+                    except Exception:
+                        fhm_active = False
+
+                    if fhm_active:
+                        # Forward pass — FHM already active, pass through directly.
+                        return function(*a, **kw)
+
+                    # Backward recomputation — re-enter with a fresh FHM instance.
+                    fresh_fhm = FunctionHookMode(model=fhm.model, hook_storage=fhm.hook_storage)
+                    with fresh_fhm:
+                        return function(*a, **kw)
+
+                return orig(function_with_fhm, *args, **kwargs)
+
+            return fhm_aware_ckpt
+
+        module._gradient_checkpointing_func = _make_fhm_aware(orig_fn)
+        n_patched += 1
+    return n_patched
+
+
 def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, ckpt_file, hidden_file):
     """Load model, prepare data, run distillation QAT, strip, and save. All heavy objects are local."""
     # Load original model and tokenizer.
@@ -978,29 +1183,30 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
         print(f"Loading existing init checkpoint: {ckpt_file}")
         model = load_checkpoint(model, ckpt_file)
     else:
-        if args.equalize_down_proj:
-            n_eq = equalize_down_proj(model, [])
+        if args.equalize_scales:
+            n_eq = equalize_down_proj(model, [], use_align_scale=args.align_scale)
             print(f"Equalized {n_eq} down_proj layers.")
-            # NOTE: equalize_up_gate_with_layernorm is intentionally disabled.
-            # Normalizing s to unit L2 norm produces values ~1/sqrt(hidden_size) ≈ 0.017,
-            # which scales gate/up weights ~60× larger and destroys INT3 quantization quality.
-            n_eq = equalize_up_gate_with_layernorm(model)
-            # print(f"Equalized {n_eq} up_proj/gate_proj layers with preceding LayerNorm.")
+            n_eq = equalize_up_gate_with_layernorm(model, use_align_scale=args.align_scale)
+            print(f"Equalized {n_eq} up_proj/gate_proj layers with preceding LayerNorm.")
         model = compress_weights(model, dataset=dataset, **compression_config)
-        # Save model_state=True when equalization is used because equalize_down_proj
+        # Save model_state=True when equalization is used because equalize_scales
         # modifies base weights in-place; save_stripped.py must restore those modified
         # weights, not the original pretrained weights.
-        save_checkpoint(model, ckpt_file, model_state=args.equalize_down_proj)
+        save_checkpoint(model, ckpt_file, model_state=args.equalize_scales)
         print(f"Saved init checkpoint: {ckpt_file}")
 
     # Enable gradient checkpointing to reduce activation memory.
-    # ForwardWithHooks keeps FunctionHookMode alive across forward+backward so that
-    # checkpoint recomputation sees the same FQ hooks as the original forward.
-    # use_reentrant=False is preferred: it counts saved tensors and the persistent
-    # mode ensures the counts match between forward and recomputation.
+    # use_reentrant=False is the modern non-deprecated implementation.
+    # _install_fhm_checkpointing_fix patches each module's gradient_checkpointing_func
+    # so that the active FunctionHookMode is re-pushed onto the C++ dispatch stack
+    # during backward recomputation, enabling weight-quantiser hooks to fire and
+    # gradients to flow through lora_A/B.  Without this patch both use_reentrant
+    # modes fail: True silently zeros gradients (no_grad forward), False raises
+    # CheckpointError (tensor-count mismatch caused by the missing mode).
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        print("Gradient checkpointing enabled (use_reentrant=False)")
+        n_patched = _install_fhm_checkpointing_fix(model)
+        print(f"Gradient checkpointing enabled (use_reentrant=False, {n_patched} modules patched for FHM)")
 
     param_to_train = set_trainable(
         model,
@@ -1135,7 +1341,7 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
         finished_epoch = epoch + 1
         if finished_epoch in save_epochs or epoch == args.epochs - 1:
             ckpt_name = f"nncf_checkpoint_epoch{finished_epoch}.pth"
-            save_checkpoint(model, last_dir / ckpt_name, model_state=args.equalize_down_proj)
+            save_checkpoint(model, last_dir / ckpt_name, model_state=args.equalize_scales)
 
 
 if __name__ == "__main__":
