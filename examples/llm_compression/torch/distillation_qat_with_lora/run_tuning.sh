@@ -42,8 +42,8 @@ NUM_TRAIN_SAMPLES=2048
 TRAIN_SEQLEN=1024
 BATCH_SIZE=32
 MICROBATCH_SIZE=2
-DATASET="pile"  # "slimpajama"
-EQUALIZE_SCALES=""  # "--equalize_scales"
+DATASET="pile"  # "slimpajama" for LLama3.2
+EQUALIZE_SCALES=""  # "--equalize_scales" (ref https://github.com/andreyanufr/nncf/blob/b6c7f5752ac324d486175d7a8eed85b175be1026/examples/llm_compression/torch/discillation_mixed_precision/main.py#L791)
 ALIGN_SCALE=""  # "--align_scale"
 
 

@@ -127,6 +127,50 @@ def _find_up_gate_groups(model: nn.Module) -> list[tuple[nn.Module, nn.Linear, l
             groups.append((up, gate, producer))
     return groups
 
+
+def _get_weight_data(module: nn.Module) -> Optional[torch.Tensor]:
+    """Return the actual weight tensor for *module*, even when the parameter is on
+    the meta device (i.e. CPU-offloaded by accelerate's device_map='auto').
+
+    For meta parameters, the real data lives in the AlignDevicesHook's
+    ``weights_map`` dict-like object; we return a copy on CPU so arithmetic works.
+    Returns ``None`` if the actual data cannot be found.
+    """
+    w = module.weight
+    if w.device.type != "meta":
+        return w.data
+    hook = getattr(module, "_hf_hook", None)
+    if hook is not None:
+        wm = getattr(hook, "weights_map", None)
+        if wm is not None:
+            try:
+                return wm["weight"].cpu()
+            except Exception:
+                pass
+    return None
+
+
+def _set_weight_data(module: nn.Module, data: torch.Tensor) -> None:
+    """Write *data* back into *module*'s weight, even when it is on meta device.
+
+    For non-meta parameters: in-place copy to the parameter's device.
+    For meta (offloaded) parameters: replace the entry in the hook's weights_map.
+    """
+    w = module.weight
+    if w.device.type != "meta":
+        w.data.copy_(data.to(device=w.device, dtype=w.dtype))
+        return
+    hook = getattr(module, "_hf_hook", None)
+    if hook is not None:
+        wm = getattr(hook, "weights_map", None)
+        if wm is not None:
+            try:
+                original = wm["weight"]
+                wm["weight"] = data.to(device=original.device, dtype=original.dtype)
+            except Exception:
+                pass
+
+
 # rescale scale to [min, max] to avoid extreme values that cause instability during training or quantization
 def align_scale(s: Tensor, min=0.1, max=1.0) -> Tensor:
     min_s = s.min()
@@ -145,8 +189,14 @@ def equalize_up_gate_with_layernorm(model: nn.Module, eps: float = 1e-5, use_ali
 
     n_done = 0
     for up, gate, producer in groups:
-        s_gate = gate.weight.abs().mean(dim=0).clamp_min(eps).to(device=gate.weight.device, dtype=gate.weight.dtype)
-        s_up = up.weight.abs().mean(dim=0).clamp_min(eps).to(device=up.weight.device, dtype=up.weight.dtype)
+        w_gate = _get_weight_data(gate)
+        w_up = _get_weight_data(up)
+        w_prod = _get_weight_data(producer)
+        if w_gate is None or w_up is None or w_prod is None:
+            continue
+
+        s_gate = w_gate.abs().mean(dim=0).clamp_min(eps).to(dtype=w_gate.dtype)
+        s_up = w_up.abs().mean(dim=0).clamp_min(eps).to(dtype=w_up.dtype)
 
         s_gate = s_gate / s_gate.norm(p=2, dim=0, keepdim=True)
         s_up = s_up / s_up.norm(p=2, dim=0, keepdim=True)
@@ -155,16 +205,16 @@ def equalize_up_gate_with_layernorm(model: nn.Module, eps: float = 1e-5, use_ali
         s = 0.1 * s_gate + 0.9 * s_up
         if use_align_scale:
             s = align_scale(s, min=0.1, max=1.0)
-        # Divide down_proj input columns by s.
-        print("Max val before equalization gate:", gate.weight.abs().max().item())
-        print("Max val before equalization up:", up.weight.abs().max().item())
-        gate.weight.mul_(1.0 / s.unsqueeze(0))
-        up.weight.mul_(1.0 / s.unsqueeze(0))
-        print("Max val after equalization gate:", gate.weight.abs().max().item())
-        print("Max val after equalization up:", up.weight.abs().max().item())
+        # Divide gate/up input columns by s.
+        print("Max val before equalization gate:", w_gate.abs().max().item())
+        print("Max val before equalization up:", w_up.abs().max().item())
+        _set_weight_data(gate, w_gate * (1.0 / s.unsqueeze(0)))
+        _set_weight_data(up, w_up * (1.0 / s.unsqueeze(0)))
+        print("Max val after equalization gate:", _get_weight_data(gate).abs().max().item())
+        print("Max val after equalization up:", _get_weight_data(up).abs().max().item())
 
         # Scale producer (LayerNorm/RMSNorm) so its output is multiplied by s.
-        s_dev = s.to(device=producer.weight.device, dtype=producer.weight.dtype)
+        s_dev = s.to(dtype=w_prod.dtype)
         # Gemma3 uses (1 + weight) RMSNorm (weight initialized to zeros):
         #   effective multiplier = (1 + weight)
         #   to scale output by s: (1 + w_new) = s*(1 + w_old)  →  w_new = s*(1+w_old) - 1
@@ -172,11 +222,11 @@ def equalize_up_gate_with_layernorm(model: nn.Module, eps: float = 1e-5, use_ali
         #   effective multiplier = weight
         #   to scale output by s: w_new = s * w_old
         if "gemma" in type(producer).__name__.lower():
-            producer.weight.data = s_dev * (1.0 + producer.weight.data) - 1.0
+            _set_weight_data(producer, s_dev * (1.0 + w_prod) - 1.0)
         else:
-            producer.weight.data.mul_(s_dev)
-        if hasattr(producer, "bias") and producer.bias is not None:
-            producer.bias.mul_(s_dev)
+            _set_weight_data(producer, w_prod * s_dev)
+        if hasattr(producer, "bias") and producer.bias is not None and producer.bias.device.type != "meta":
+            producer.bias.data.mul_(s_dev.to(producer.bias.device, producer.bias.dtype))
         n_done += 1
     return n_done
 
@@ -221,19 +271,25 @@ def equalize_down_proj(
 
     n_done = 0
     for _, down, producers in groups:
-        s = down.weight.abs().mean(dim=0).clamp_min(eps).to(device=down.weight.device, dtype=down.weight.dtype)
+        w_down = _get_weight_data(down)
+        if w_down is None:
+            continue
+        s = w_down.abs().mean(dim=0).clamp_min(eps).to(dtype=w_down.dtype)
         if use_align_scale:
             s = align_scale(s, min=0.1, max=1.0)
-        print("Max val before equalization:", down.weight.abs().max().item())
-        down.weight.mul_(1.0 / s.unsqueeze(0))
-        print("Max val after equalization:", down.weight.abs().max().item())
+        print("Max val before equalization:", w_down.abs().max().item())
+        _set_weight_data(down, w_down * (1.0 / s.unsqueeze(0)))
+        print("Max val after equalization:", _get_weight_data(down).abs().max().item())
 
         # Scale producer output rows by s.
         for prod in producers:
-            s_dev = s.to(device=prod.weight.device, dtype=prod.weight.dtype)
-            prod.weight.mul_(s_dev.unsqueeze(1))
-            if prod.bias is not None:
-                prod.bias.mul_(s_dev)
+            w_prod = _get_weight_data(prod)
+            if w_prod is None:
+                continue
+            s_dev = s.to(dtype=w_prod.dtype)
+            _set_weight_data(prod, w_prod * s_dev.unsqueeze(1))
+            if prod.bias is not None and prod.bias.device.type != "meta":
+                prod.bias.data.mul_(s_dev.to(prod.bias.device, prod.bias.dtype))
         n_done += 1
     return n_done
 
@@ -1319,14 +1375,23 @@ def _train(args, compression_config, device, torch_dtype, last_dir, output_dir, 
                         targets = torch.tanh(targets)
                         targets = targets * fls
             outputs = model(**inputs).logits
-            loss = kl_div(outputs, targets.to(dtype=torch_dtype, device=device))
+            _targets = targets.to(dtype=torch_dtype, device=device)
+            loss = kl_div(outputs, _targets)
 
             # Perform an optimization step after accumulating gradients over multiple minibatches.
+            if not torch.isfinite(loss):
+                def _tensor_stats(t: torch.Tensor, name: str) -> str:
+                    t = t.float()
+                    n_nan = t.isnan().sum().item()
+                    n_inf = t.isinf().sum().item()
+                    return (f"{name}: shape={list(t.shape)} nan={n_nan} inf={n_inf} "
+                            f"min={t[t.isfinite()].min().item():.4g} max={t[t.isfinite()].max().item():.4g}")
+                print(_tensor_stats(outputs, "student_logits"))
+                print(_tensor_stats(_targets, "teacher_logits"))
+                err = f"Fine-tuning loss is {loss.item()}"
+                raise ValueError(err)
             loss_numerator += loss.item()
             grad_steps += 1
-            if not torch.isfinite(loss).item():
-                err = f"Fine-tuning loss is {loss}"
-                raise ValueError(err)
             (loss / grad_accumulation_steps).backward()
             if grad_steps == grad_accumulation_steps:
                 opt.step()
